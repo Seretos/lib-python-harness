@@ -1,0 +1,201 @@
+name: release
+
+# Manual lib-release flow. Analogous to the plugin's release.yml but
+# without the binary build (libs ship as Python source distributions
+# pulled by downstream consumers via `git+https://.../@vX.Y.Z` or
+# `@release/Nx`). Topology:
+#
+#   stamp+publish (ubuntu-22.04) -> validates semver, fails on
+#                                   duplicate tag, stamps pyproject.toml
+#                                   with the requested version on a
+#                                   fresh release branch built off main,
+#                                   tags the stamp commit as vX.Y.Z,
+#                                   force-pushes release/Nx (the
+#                                   floating branch downstream consumers
+#                                   pin to), and creates the GitHub
+#                                   Release. `main` is never touched —
+#                                   the bot commit lives only on the
+#                                   release/Nx branch.
+#
+# Release-branch policy:
+#   release/0.x  — all 0.x.y releases.   Force-pushed each release.
+#   release/1.x  — all 1.x.y releases.   Created the first time a 1.x.y
+#                  release is published; force-pushed each release after.
+#   release/Nx   — analogous.
+#
+# Past tags remain reachable via `git+https://.../@vX.Y.Z` even after
+# a force-push because the commit they point to is preserved by git as
+# long as the tag exists.
+#
+# No MARKETPLACE_DISPATCH_TOKEN: a lib never dispatches into the
+# marketplace. The publish steps use only the built-in secrets.GITHUB_TOKEN.
+#
+# Downstream notification: the final step opens a "bump me" ticket in every
+# repo that pins this lib, so a consumer agent picks the update up. That step
+# needs a CONSUMER_TICKET_TOKEN secret (a PAT with Issues: write on the
+# consumer repos) — GITHUB_TOKEN cannot open issues cross-repo. A fresh lib
+# has no consumers, so the step ships as a no-op until you fill in CONSUMERS.
+# See AGENTS.md "Downstream dependency notifications" and the recovery
+# workflow ticket.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (semver, no leading v) e.g. 0.2.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Validate version is semver
+        shell: bash
+        run: |
+          V="${{ inputs.version }}"
+          if [[ ! "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Version '$V' is not valid semver (expected MAJOR.MINOR.PATCH[-PRERELEASE])."
+            exit 1
+          fi
+
+      - name: Check tag does not yet exist
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ inputs.version }}"
+          if gh api "repos/${{ github.repository }}/git/refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag ${TAG} already exists. Delete it first or pick a new version."
+            exit 1
+          fi
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Compute release-branch name
+        id: branch
+        shell: bash
+        run: |
+          V="${{ inputs.version }}"
+          MAJOR=$(echo "$V" | cut -d. -f1)
+          BRANCH="release/${MAJOR}.x"
+          echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "Will publish to ${BRANCH}"
+
+      - name: Stamp pyproject.toml, commit, tag, force-push release branch
+        # Stamp via sed (POSIX, no extra tools), anchored to start of
+        # line to avoid touching nested versions in tool tables. The
+        # stamp commit lives only on the release/Nx branch — main
+        # stays at whatever HEAD it was before this workflow ran.
+        shell: bash
+        run: |
+          V="${{ inputs.version }}"
+          TAG="v${V}"
+          BRANCH="${{ steps.branch.outputs.name }}"
+
+          sed -i -E 's/^(version[[:space:]]*=[[:space:]]*")[^"]*(")/\1'"$V"'\2/' pyproject.toml
+          grep -E "^version[[:space:]]*=[[:space:]]*\"$V\"" pyproject.toml \
+            || { echo "::error::pyproject.toml stamp failed"; exit 1; }
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Build the release branch fresh from main HEAD each time.
+          # Past tags pin past commits — they are independent of where
+          # the release/Nx pointer currently sits.
+          git checkout -B "$BRANCH"
+          git add pyproject.toml
+          git commit -m "release: ${TAG}"
+
+          git tag -a "$TAG" -m "${TAG}"
+
+          git push origin "$BRANCH" --force
+          git push origin "$TAG"
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ inputs.version }}"
+          PRE_FLAG=""
+          if [[ "${{ inputs.version }}" == *-* ]]; then
+            PRE_FLAG="--prerelease"
+          fi
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "$TAG" \
+            --generate-notes \
+            $PRE_FLAG
+
+      - name: Open dependency-update tickets in consumers
+        # continue-on-error: a missing/invalid CONSUMER_TICKET_TOKEN, or a
+        # broken file in one consumer, must never fail the release itself —
+        # the recovery workflow (ticket.yml) re-files. The step still annotates
+        # a red ::error:: per failed consumer and exits non-zero, so the run
+        # summary shows exactly which consumer/token needs attention.
+        continue-on-error: true
+        shell: bash
+        # CONSUMERS / TITLE / BODY live in env (not a run-block heredoc): a
+        # heredoc body at column 0 dedents out of the YAML block scalar and
+        # breaks the file. A YAML block scalar holds the markdown verbatim and
+        # ${{ }} still expands; bash just references the variables.
+        env:
+          GH_TOKEN: ${{ secrets.CONSUMER_TICKET_TOKEN }}
+          # One "owner/repo" per consumer that pins this lib (commas or
+          # newlines both work). Leave empty for a lib with no consumers yet —
+          # the loop then runs zero times and the step is a green no-op. Add a
+          # line here when a downstream repo starts depending on this lib.
+          CONSUMERS: |
+          TITLE: "chore(deps): bump lib-python-harness to v${{ inputs.version }}"
+          BODY: |
+            ## Dependency update
+
+            A new release of **lib-python-harness** has been published: `v${{ inputs.version }}`.
+
+            ### Action required
+
+            1. Update the pin in `pyproject.toml` to:
+               ```
+               lib-python-harness @ git+https://github.com/Seretos/lib-python-harness@v${{ inputs.version }}
+               ```
+            2. Run this project's test suite to confirm nothing broke.
+            3. Commit the bump and open a PR.
+        run: |
+          # Normalize commas to newlines so CONSUMERS accepts either form.
+          NORMALIZED="$(printf '%s\n' "$CONSUMERS" | tr ',' '\n')"
+          failed=0
+          # Loop in the current shell (here-string, not a pipe) so $failed
+          # survives to the final exit.
+          while IFS= read -r RAW; do
+            CONSUMER="$(printf '%s' "$RAW" | xargs)"   # trim surrounding space
+            [ -z "$CONSUMER" ] && continue
+
+            # Idempotency: skip if an open issue with this exact title already
+            # exists. --paginate follows all pages; jq drops pull requests.
+            EXISTING=$(gh api --paginate "repos/${CONSUMER}/issues?state=open&per_page=100" \
+              --jq 'map(select(.pull_request|not)) | .[].title' 2>/dev/null || true)
+            if printf '%s\n' "$EXISTING" | grep -qxF "$TITLE"; then
+              echo "Issue already exists in ${CONSUMER}, skipping."
+              continue
+            fi
+
+            # Attempt with the 'dependencies' label; retry without it if the
+            # consumer repo does not define that label.
+            if gh issue create --repo "$CONSUMER" --title "$TITLE" --body "$BODY" --label dependencies \
+               || gh issue create --repo "$CONSUMER" --title "$TITLE" --body "$BODY"; then
+              echo "Ticket opened in ${CONSUMER}."
+            else
+              echo "::error::Filing in ${CONSUMER} failed (check CONSUMER_TICKET_TOKEN scope for that repo)."
+              failed=1
+            fi
+          done <<< "$NORMALIZED"
+          exit $failed

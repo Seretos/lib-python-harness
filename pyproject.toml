@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lib-python-harness"
+version = "0.1.0"
+description = "Provider-independent subagent engine: lifecycle, dispatch and transport abstraction."
+requires-python = ">=3.11"
+authors = [{ name = "Arne von Appen" }]
+# Runtime deps go here. Keep the surface small — this is a leaf dependency
+# consumed by other projects. Empty by default.
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra --strict-markers"
