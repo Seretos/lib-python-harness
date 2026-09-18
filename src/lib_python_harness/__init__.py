@@ -7,25 +7,36 @@ See `README.md` for usage.
 """
 from __future__ import annotations
 
+from .agents.model import AgentDefinition
+from .agents.sources import ClaudeMarkdownSource, DefinitionSource
+from .agents.discovery import discover
 from .errors import (
+    FrontmatterError,
     HarnessError,
     IllegalTransitionError,
     RunIdentityUnverifiedError,
     UnsafeCwdError,
 )
 from .harness import Harness, run
+from .host.context import HostContext
 from .providers.base import Isolation, LaunchPlan, Provider, RunResult, RunSpec
 from .providers.claude_cli import ClaudeCliProvider
+from .resolve import resolve
 from .runtime.lifecycle import RunState
 from .runtime.store import FileRunStore, InMemoryRunStore, RunStore
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "AgentDefinition",
     "ClaudeCliProvider",
+    "ClaudeMarkdownSource",
+    "DefinitionSource",
     "FileRunStore",
+    "FrontmatterError",
     "Harness",
     "HarnessError",
+    "HostContext",
     "IllegalTransitionError",
     "InMemoryRunStore",
     "Isolation",
@@ -38,5 +49,7 @@ __all__ = [
     "RunStore",
     "UnsafeCwdError",
     "__version__",
+    "discover",
+    "resolve",
     "run",
 ]

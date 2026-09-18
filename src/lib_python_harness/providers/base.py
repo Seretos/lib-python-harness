@@ -38,13 +38,22 @@ from typing import Any, Iterable, Protocol
 class Isolation(enum.Enum):
     """The isolation profile a run is spawned under.
 
-    Only `CLEAN` exists in this ticket: no user/project settings, no
-    plugins, no skills, no MCP servers, no hooks, no CLAUDE.md, no
-    auto-memory. Further profiles (e.g. a "trusted" one that keeps project
-    settings) are a later ticket's addition, not this one's.
+    `CLEAN`: no user/project settings, no plugins, no skills, no MCP
+    servers, no hooks, no CLAUDE.md, no auto-memory.
+
+    `INHERIT`: the opposite recipe — the child runs with the parent's own
+    cwd, CLAUDE.md discovery, settings (`--setting-sources
+    user,project,local`), permission mode and MCP servers, plus whichever of
+    the 10 agent-definition fields (`permission_mode`, `tools`,
+    `disallowed_tools`, `skills`, `max_turns`, `hooks`, `mcp_servers`,
+    `omit_claude_md`, `agent_name`, `description`) the caller set on the
+    `RunSpec` — letting a plugin-authored Claude Code subagent run through
+    the harness at all. Added by ticket #2 for exactly this purpose; a
+    further profile is a later ticket's addition, not this one's.
     """
 
     CLEAN = "clean"
+    INHERIT = "inherit"
 
 
 @dataclass
@@ -71,6 +80,23 @@ class RunSpec:
     allow_nonempty_cwd: bool = False
     artifacts_dir: str | Path | None = None
     timeout: float | None = None
+
+    # -- Isolation.INHERIT only (all None-defaulted -> CLEAN's argv is
+    # unaffected by their mere presence on the dataclass). Each one is a
+    # distinct Claude Code agent-definition frontmatter field the ticket's
+    # goal sentence names; `resolve()` (agents/model.AgentDefinition ->
+    # RunSpec) is the one place that fills them in from a real definition,
+    # but any caller may set them directly (as the tests here do).
+    permission_mode: str | None = None
+    tools: str | None = None
+    disallowed_tools: str | None = None
+    skills: list[str] | None = None
+    max_turns: int | None = None
+    hooks: dict[str, Any] | None = None
+    mcp_servers: dict[str, Any] | None = None
+    omit_claude_md: bool | None = None
+    agent_name: str | None = None
+    description: str | None = None
 
 
 @dataclass(frozen=True)

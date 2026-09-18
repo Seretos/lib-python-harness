@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"00000000-0000-4000-8000-000000000001"}
+{"type":"assistant","message":{"model":"claude-sonnet-4-5-20250929","content":[{"type":"text","text":"first reply"}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"a follow-up"}]}}
+{"type":"assistant","message":{"model":"claude-opus-4-1-20250805","content":[{"type":"text","text":"final reply"}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"final reply","session_id":"00000000-0000-4000-8000-000000000001"}
