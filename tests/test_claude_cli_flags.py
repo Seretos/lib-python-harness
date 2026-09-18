@@ -49,7 +49,17 @@ def _build_plan(tmp_path, **spec_overrides):
     return provider.build_launch_plan(spec, session_id=str(uuid.uuid4()), run_dir=run_dir)
 
 
-def test_argv_contains_canonical_clean_set(tmp_path):
+def test_argv_contains_canonical_clean_set(tmp_path, monkeypatch):
+    # Plant every SCRUBBED_ENV name into the parent environment with a
+    # nonce value *before* building the plan. Without this, on a runner
+    # where these vars are simply unset already, a builder that performs
+    # zero scrubbing would still pass the loop below — see F1. Planting a
+    # concrete value first means "absent from plan.env" can only be true
+    # because the builder actually removed it.
+    nonce = "leaked-nonce-should-be-scrubbed"
+    for name in SCRUBBED_ENV:
+        monkeypatch.setenv(name, nonce)
+
     plan = _build_plan(tmp_path)
     argv = plan.argv
 
@@ -76,7 +86,8 @@ def test_argv_contains_canonical_clean_set(tmp_path):
     assert plan.stdin == "Reply with exactly OK"
 
     for name in SCRUBBED_ENV:
-        assert name not in plan.env
+        assert name not in plan.env, f"{name} survived env scrub"
+    assert nonce not in plan.env.values(), "scrubbed value leaked under a different key"
 
 
 def test_config_dir_passthrough_survives_env_scrub(tmp_path, monkeypatch):

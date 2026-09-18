@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from lib_python_harness.runtime.lifecycle import RunState, _TRANSITIONS
+from lib_python_harness.runtime.lifecycle import _TRANSITIONS
 
 DOC_PATH = Path(__file__).resolve().parent.parent / "docs" / "run-lifecycle.md"
 
@@ -29,14 +29,21 @@ def _transitions_from_table() -> set[tuple[str, str]]:
     return {(frm.name, to.name) for frm, tos in _TRANSITIONS.items() for to in tos}
 
 
-def test_doc_exists():
+def test_doc_exists_and_documents_at_least_one_transition():
+    # Folded from the former bare test_doc_exists / test_doc_mentions_every_state
+    # (tautology F12): existence plus a bare RunState-name scan is satisfied by
+    # a one-line file listing the five state names with no real transitions.
+    # Tying existence to "declares at least one structural edge" means a doc
+    # that only names the states, without describing any transition, already
+    # fails here — the exhaustive edge-set check below is what proves every
+    # legal transition (and therefore every state that appears in one) is
+    # documented correctly, not merely mentioned.
     assert DOC_PATH.exists(), f"{DOC_PATH} is missing"
-
-
-def test_doc_mentions_every_state():
-    text = DOC_PATH.read_text()
-    for state in RunState:
-        assert state.name in text, f"{state.name} not documented in {DOC_PATH}"
+    assert _transitions_from_doc(), (
+        f"{DOC_PATH} exists but declares no '- `FROM` -> `TO`' transition "
+        f"lines — naming the states without documenting any real transition "
+        f"between them is not lifecycle documentation"
+    )
 
 
 def test_doc_mentions_every_legal_transition():

@@ -35,6 +35,25 @@ EXPECTED_NAMES = {
     "UnsafeCwdError",
 }
 
+# Content-bearing detail each identifier's README section must mention,
+# pulled straight from the plan's own description of that identifier's real
+# behaviour (plan.md "Approach") rather than a generic word count — see
+# tautology finding F11: a heading followed by filler prose ("this section
+# will be written up later on") must NOT satisfy the documentation check.
+REQUIRED_README_DETAILS: dict[str, tuple[str, ...]] = {
+    "__version__": ("version",),
+    "run": ("harness", "delegat"),
+    "Harness": ("lifecycle", "cleanup", "stop"),
+    "RunSpec": ("prompt",),
+    "RunResult": ("transcript", "session"),
+    "Isolation": ("clean",),
+    "RunState": ("transition", "cancelled", "completed"),
+    "HarnessError": ("base",),
+    "IllegalTransitionError": ("transition",),
+    "RunIdentityUnverifiedError": ("pid", "identity"),
+    "UnsafeCwdError": ("repo", "empty", "cwd"),
+}
+
 
 def test_all_is_sorted_and_duplicate_free():
     all_names = lib_python_harness.__all__
@@ -75,10 +94,17 @@ def test_every_all_entry_is_documented_in_readme():
             f"{name} is exported but README.md has no heading section "
             f"for it (expected a '### {name}' heading followed by prose)"
         )
-        prose_words = [w for w in re.findall(r"[A-Za-z]+", body) if w != name]
-        assert len(prose_words) >= 6, (
-            f"README.md's section for {name} has no real description — "
-            f"only {len(prose_words)} prose word(s) besides the name itself"
+        required_terms = REQUIRED_README_DETAILS.get(name)
+        assert required_terms is not None, (
+            f"{name} is exported but this test has no REQUIRED_README_DETAILS "
+            f"entry for it — add the specific behavioural detail its README "
+            f"section must mention before trusting its documentation"
+        )
+        body_lower = body.lower()
+        assert any(term in body_lower for term in required_terms), (
+            f"README.md's section for {name} mentions none of {required_terms} "
+            f"— filler prose under a correct heading is not documentation of "
+            f"{name}'s actual behaviour"
         )
 
 
