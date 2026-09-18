@@ -26,4 +26,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-markers -m \"not requires_claude\""
+markers = [
+  "requires_claude: needs a real installed `claude` CLI plus subscription auth; excluded by default, run explicitly with `-m requires_claude`.",
+]
