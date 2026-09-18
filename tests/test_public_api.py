@@ -35,23 +35,75 @@ EXPECTED_NAMES = {
     "UnsafeCwdError",
 }
 
-# Content-bearing detail each identifier's README section must mention,
-# pulled straight from the plan's own description of that identifier's real
-# behaviour (plan.md "Approach") rather than a generic word count — see
-# tautology finding F11: a heading followed by filler prose ("this section
-# will be written up later on") must NOT satisfy the documentation check.
-REQUIRED_README_DETAILS: dict[str, tuple[str, ...]] = {
-    "__version__": ("version",),
-    "run": ("harness", "delegat"),
-    "Harness": ("lifecycle", "cleanup", "stop"),
-    "RunSpec": ("prompt",),
-    "RunResult": ("transcript", "session"),
-    "Isolation": ("clean",),
-    "RunState": ("transition", "cancelled", "completed"),
-    "HarnessError": ("base",),
-    "IllegalTransitionError": ("transition",),
-    "RunIdentityUnverifiedError": ("pid", "identity"),
-    "UnsafeCwdError": ("repo", "empty", "cwd"),
+# Content-bearing details each identifier's README section must mention,
+# pulled verbatim from the plan's own description of that identifier's real
+# behaviour (plan.md "Approach", lines ~40-90) — not a generic word count
+# and not a single guessable keyword. See tautology finding F1 (round 3):
+# a heading followed by a filler sentence containing one required keyword
+# ("Raised about the cwd; empty repo handling described elsewhere.") passed
+# the previous version of this check without documenting any real behaviour.
+#
+# Each entry is (terms, min_required): the README section for that name
+# must contain at least `min_required` of the *distinct* terms in `terms`.
+# The terms are specific field names, method names, enum member names, or
+# raising conditions the plan names for that identifier — e.g. real
+# RunSpec fields (prompt, cwd, allow_nonempty_cwd, timeout, ...), real
+# Harness method names (start, poll, stop, cleanup), real RunState member
+# names (CREATED, RUNNING, COMPLETED, FAILED, CANCELLED). Requiring several
+# of these together (not one) makes a generic filler sentence implausible:
+# it would have to accidentally combine multiple specific, unrelated
+# technical terms the plan uses for that exact identifier.
+REQUIRED_README_DETAILS: dict[str, tuple[tuple[str, ...], int]] = {
+    # No behavioural surface beyond "the installed version string" — one
+    # term is the whole content available for this name.
+    "__version__": (("version",), 1),
+    # Approach: "__init__.py also exports a module-level run(spec)
+    # delegating to Harness().run(spec)".
+    "run": (("delegat", "harness", "runspec"), 2),
+    # Approach: "harness.py ... exposes Harness with run(spec) (= start +
+    # wait, one code path), start, poll, stop(run_id, timeout=10.0),
+    # cleanup(run_id, remove_cwd=False)".
+    "Harness": (("start", "poll", "stop", "cleanup"), 3),
+    # Approach: "RunSpec (prompt, isolation, model, effort, system_prompt,
+    # json_schema, cwd, allow_nonempty_cwd, artifacts_dir, timeout)".
+    "RunSpec": (
+        ("prompt", "cwd", "allow_nonempty_cwd", "timeout", "effort",
+         "system_prompt", "json_schema", "artifacts_dir"),
+        3,
+    ),
+    # R1/R7: RunResult-carrying fields named in the plan's own assertions
+    # — non-empty session_id, existing transcript_path, state == COMPLETED,
+    # duration < 60s / duration_s.
+    "RunResult": (("session", "transcript", "duration", "state"), 3),
+    # Approach: "Isolation (only CLEAN)" plus what CLEAN actually strips
+    # per R3/ClaudeCliProvider — no tools, no inherited settings sources,
+    # no auto-memory load.
+    "Isolation": (("clean", "tools", "memory", "settings"), 2),
+    # Approach: "RunState enum — CREATED, RUNNING, COMPLETED, FAILED,
+    # CANCELLED".
+    "RunState": (
+        ("created", "running", "completed", "failed", "cancelled"),
+        3,
+    ),
+    # Approach: "HarnessError base + IllegalTransitionError +
+    # RunIdentityUnverifiedError + UnsafeCwdError — four types" — a
+    # documented base must actually name at least two of its siblings.
+    "HarnessError": (
+        ("illegaltransitionerror", "runidentityunverifiederror",
+         "unsafecwderror"),
+        2,
+    ),
+    # Approach: "transition() raises IllegalTransitionError outside it"
+    # and "a stop() on a COMPLETED run raises before any signal logic is
+    # reached" — the raising condition, not just the class name.
+    "IllegalTransitionError": (("completed", "signal", "stop"), 2),
+    # Approach: "None is acted on only while this process still holds the
+    # child's Popen, else stop() raises RunIdentityUnverifiedError" — the
+    # risk being guarded against is signalling a recycled pid (R4).
+    "RunIdentityUnverifiedError": (("popen", "pid", "recycled"), 2),
+    # Approach: "must hold no .git in it or any ancestor, and must be
+    # empty, else UnsafeCwdError".
+    "UnsafeCwdError": (("git", "empty", "ancestor"), 2),
 }
 
 
@@ -94,17 +146,22 @@ def test_every_all_entry_is_documented_in_readme():
             f"{name} is exported but README.md has no heading section "
             f"for it (expected a '### {name}' heading followed by prose)"
         )
-        required_terms = REQUIRED_README_DETAILS.get(name)
-        assert required_terms is not None, (
+        detail = REQUIRED_README_DETAILS.get(name)
+        assert detail is not None, (
             f"{name} is exported but this test has no REQUIRED_README_DETAILS "
-            f"entry for it — add the specific behavioural detail its README "
+            f"entry for it — add the specific behavioural details its README "
             f"section must mention before trusting its documentation"
         )
+        required_terms, min_required = detail
         body_lower = body.lower()
-        assert any(term in body_lower for term in required_terms), (
-            f"README.md's section for {name} mentions none of {required_terms} "
-            f"— filler prose under a correct heading is not documentation of "
-            f"{name}'s actual behaviour"
+        matched = [term for term in required_terms if term in body_lower]
+        assert len(matched) >= min_required, (
+            f"README.md's section for {name} mentions only {matched} of the "
+            f"required technical details {required_terms} (needs at least "
+            f"{min_required} distinct terms) — a single guessable keyword, or "
+            f"generic filler prose, must not be able to satisfy this check; "
+            f"the section must name several of {name}'s actual fields/"
+            f"methods/members/raising-conditions from the plan"
         )
 
 
