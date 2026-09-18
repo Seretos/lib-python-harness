@@ -44,12 +44,12 @@ class Isolation(enum.Enum):
     `INHERIT`: the opposite recipe — the child runs with the parent's own
     cwd, CLAUDE.md discovery, settings (`--setting-sources
     user,project,local`), permission mode and MCP servers, plus whichever of
-    the 9 agent-definition fields (`permission_mode`, `tools`,
+    the 10 agent-definition fields (`permission_mode`, `tools`,
     `disallowed_tools`, `skills`, `max_turns`, `hooks`, `mcp_servers`,
-    `omit_claude_md`, `agent_name`) the caller set on the `RunSpec` —
-    letting a plugin-authored Claude Code subagent run through the harness
-    at all. Added by ticket #2 for exactly this purpose; a further profile
-    is a later ticket's addition, not this one's.
+    `omit_claude_md`, `agent_name`, `description`) the caller set on the
+    `RunSpec` — letting a plugin-authored Claude Code subagent run through
+    the harness at all. Added by ticket #2 for exactly this purpose; a
+    further profile is a later ticket's addition, not this one's.
     """
 
     CLEAN = "clean"
@@ -96,6 +96,7 @@ class RunSpec:
     mcp_servers: dict[str, Any] | None = None
     omit_claude_md: bool | None = None
     agent_name: str | None = None
+    description: str | None = None
 
 
 @dataclass(frozen=True)

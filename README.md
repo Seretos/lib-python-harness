@@ -462,11 +462,12 @@ for qualified_name, definition in discover(context).items():
 
 Turns one `AgentDefinition` plus a `HostContext` into a `RunSpec` under
 `Isolation.INHERIT`, once: `model`/`permission_mode`/`effort` are
-definition-else-context; `tools`/`disallowed_tools`/`skills`/`max_turns`
-always come from the definition; `omit_claude_md`/`hooks`/`mcp_servers` come
-from the definition too, but are dropped at plugin scope (a documented
-assumption about how the parent Claude Code loads plugin agents, not
-independently verified). The returned `RunSpec` is ready for `run()`.
+definition-else-context; `tools`/`disallowed_tools`/`skills`/`max_turns`/
+`description` always come from the definition; `omit_claude_md`/`hooks`/
+`mcp_servers` come from the definition too, but are dropped at plugin scope
+(a documented assumption about how the parent Claude Code loads plugin
+agents, not independently verified). The returned `RunSpec` is ready for
+`run()`.
 
 ```python
 from lib_python_harness import HostContext, discover, resolve
@@ -493,6 +494,7 @@ just through the materialized path or a converted array).
 
 | Frontmatter field | `payload` carrier            | `materialized` carrier | Notes                                   |
 | ------------------ | ----------------------------- | ----------------------- | ---------------------------------------- |
+| `description`       | `--agents` `description`      | `description:`           | never dropped/defaulted by `resolve()` — the real frontmatter value flows through unchanged; `payload` mode simply omits the JSON key when the definition has none, while `materialized` mode substitutes a synthesized filler in that case (its own loader silently drops a description-less file from discovery, live-verified) |
 | `model`             | top-level `--model`           | `model:`                 | `model: inherit` passes through literally |
 | `permissionMode`    | top-level `--permission-mode` | `permissionMode:`        | dropped at plugin scope                  |
 | `effort`            | top-level `--effort`          | (not carried)            | definition-else-context                  |

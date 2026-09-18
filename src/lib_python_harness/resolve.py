@@ -17,6 +17,14 @@ the definition itself does not set one, so the parent's own inherited MCP
 servers still reach `--mcp-config` even for a definition that never
 mentions `mcpServers:` at all.
 
+`description` always comes from the definition, unconditionally — there is
+no `host_context` fallback (a session has no ambient "description") and no
+plugin-scope drop (unlike `permission_mode`/`hooks`/`mcp_servers`, a
+plugin's own description is not part of the ignore-list assumption). An
+empty/missing frontmatter description normalizes to `None` here, so the
+`payload`/`materialized` carriers can each apply their own fallback
+(omit the JSON key; synthesize a dispatchable filler) uniformly.
+
 The agent's own body becomes both `RunSpec.prompt` (there is no separate
 "task" argument to `resolve()` — the definition's body *is* what the
 dispatched run is asked to do) and `RunSpec.system_prompt` (unused by
@@ -67,4 +75,5 @@ def resolve(definition, host_context) -> RunSpec:
         mcp_servers=mcp_servers,
         omit_claude_md=omit_claude_md,
         agent_name=definition.qualified_name,
+        description=definition.description or None,
     )

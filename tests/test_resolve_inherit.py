@@ -103,6 +103,7 @@ def test_payload_mode_emits_agents_json_and_agent_flag_no_add_dir(tmp_path):
         max_turns=3,
         skills=["reviewer-skill"],
         agent_name="qualified-name",
+        description="Reviews code for correctness.",
         cwd=repo,
     )
     accepted_keys = {
@@ -139,6 +140,11 @@ def test_payload_mode_emits_agents_json_and_agent_flag_no_add_dir(tmp_path):
     assert set(agents_json.keys()) == {"qualified-name"}
     payload = agents_json["qualified-name"]
     assert payload["prompt"] == "Body text."
+    # review round 1, R1 [blocking]: description was hardcoded to None in
+    # _build_agent_payload, discarding the plugin author's real text — the
+    # --agents JSON payload must carry the real description, never a
+    # generic filler or a dropped key.
+    assert payload["description"] == "Reviews code for correctness."
     assert payload["model"] == "sonnet"
     assert payload["permissionMode"] == "acceptEdits"
     assert payload["maxTurns"] == 3
@@ -158,6 +164,7 @@ def test_materialized_mode_when_definition_sets_a_rejected_key(tmp_path):
         model="sonnet",
         skills=["reviewer-skill"],
         agent_name="qualified-name",
+        description="Reviews code for correctness.",
         cwd=repo,
     )
     accepted_keys = {"description", "prompt", "tools", "disallowedTools", "model",
@@ -183,7 +190,17 @@ def test_materialized_mode_when_definition_sets_a_rejected_key(tmp_path):
     assert add_dir_value == str(run_dir / "agents")
     assert "--agent" in plan.argv
     assert plan.argv[plan.argv.index("--agent") + 1] == "qualified-name"
-    assert (run_dir / "agents" / ".claude" / "agents" / "qualified-name.md").exists()
+    materialized_path = run_dir / "agents" / ".claude" / "agents" / "qualified-name.md"
+    assert materialized_path.exists()
+
+    # review round 1, R1 [blocking]: materialize_agent_dir wrote a synthetic
+    # filler string instead of the definition's real description, discarding
+    # the plugin author's actual text. The materialized frontmatter must
+    # carry the real description, not a generic filler.
+    from lib_python_harness.agents.frontmatter import parse_frontmatter
+
+    fields, _body = parse_frontmatter(materialized_path.read_text())
+    assert fields["description"] == "Reviews code for correctness."
 
 
 # -- additional edge cases: field-resolution semantics (resolve()) ----------
@@ -288,6 +305,43 @@ def test_model_falls_back_to_host_context_model_when_definition_unset():
 
     spec = resolve(_definition(), _host_context(model="haiku"))
     assert spec.model == "haiku"
+
+
+def test_description_is_carried_from_definition_to_runspec():
+    # review round 1, R1 [blocking]: RunSpec had no description field at
+    # all, so resolve() could not carry AgentDefinition.description through
+    # to either dispatch carrier.
+    from lib_python_harness.resolve import resolve
+
+    spec = resolve(
+        _definition(model="sonnet", description="Reviews code for correctness."),
+        _host_context(),
+    )
+    assert spec.description == "Reviews code for correctness."
+
+
+def test_description_survives_plugin_scope():
+    # Unlike permission_mode/hooks/mcp_servers, description is not part of
+    # the plugin-scope ignore-list assumption (plan Premises) — a plugin
+    # agent's own description must still reach the child.
+    from lib_python_harness.resolve import resolve
+
+    spec = resolve(
+        _definition(
+            model="sonnet",
+            description="A plugin agent.",
+            source_scope="plugin",
+        ),
+        _host_context(),
+    )
+    assert spec.description == "A plugin agent."
+
+
+def test_description_normalizes_empty_to_none():
+    from lib_python_harness.resolve import resolve
+
+    spec = resolve(_definition(model="sonnet", description=""), _host_context())
+    assert spec.description is None
 
 
 def test_hooks_and_mcp_servers_arrive_on_the_spec_at_project_scope():

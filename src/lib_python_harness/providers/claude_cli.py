@@ -134,6 +134,7 @@ AGENT_JSON_KEYS: frozenset[str] = frozenset(
 # maintained lists that could drift apart.
 _SPEC_TO_AGENT_JSON_KEY: tuple[tuple[str, str], ...] = (
     ("prompt", "prompt"),
+    ("description", "description"),
     ("tools", "tools"),
     ("disallowed_tools", "disallowedTools"),
     ("model", "model"),
@@ -178,7 +179,7 @@ def _split_tools(value: str | None) -> list[str] | None:
 def _build_agent_payload(spec: RunSpec, accepted_keys: Iterable[str]) -> dict[str, Any]:
     accepted = set(accepted_keys)
     candidate: dict[str, Any] = {
-        "description": None,  # RunSpec carries no separate description field
+        "description": spec.description,
         "prompt": spec.prompt,
         "tools": _split_tools(spec.tools),
         "disallowedTools": _split_tools(spec.disallowed_tools),
@@ -214,14 +215,16 @@ def materialize_agent_dir(spec: RunSpec, run_dir: Path | str) -> Path:
     frontmatter directly, unconstrained by that schema. The body is
     `spec.prompt`, verbatim. `run_dir` need not exist beforehand.
 
-    `description` is always written, even though `RunSpec` carries no
-    dedicated description field: a live probe against the real CLI
-    (v2.1.277, R5's own substitute-execution run) found that `--agent
-    <stem>` reports `<stem> not found` for a materialized file with no
-    `description:` key at all — the CLI's own agent loader silently drops a
-    description-less file from discovery. A generic, synthesized
-    description is what keeps the materialized carrier actually
-    dispatchable; it is not meant to be informative prose.
+    `description` is always written, even though the definition might not
+    have set one: a live probe against the real CLI (v2.1.277, R5's own
+    substitute-execution run) found that `--agent <stem>` reports `<stem>
+    not found` for a materialized file with no `description:` key at all —
+    the CLI's own agent loader silently drops a description-less file from
+    discovery. `spec.description` (threaded through by `resolve()` from
+    `AgentDefinition.description`) is used when the definition actually set
+    one; the generic synthesized filler below is only a fallback for the
+    genuinely-description-less case, to keep the materialized carrier
+    dispatchable rather than to stand in for real prose.
     """
     from ..agents.frontmatter import dump_frontmatter
 
@@ -233,7 +236,8 @@ def materialize_agent_dir(spec: RunSpec, run_dir: Path | str) -> Path:
 
     fields: dict[str, Any] = {
         "name": stem,
-        "description": f"Materialized lib-python-harness agent dispatch ({stem})",
+        "description": spec.description
+        or f"Materialized lib-python-harness agent dispatch ({stem})",
     }
     for value, key in (
         (spec.model, "model"),
