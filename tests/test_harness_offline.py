@@ -189,11 +189,51 @@ def test_stop_cancels_running_child(tmp_path):
     provenance_path = Path(record_after["provenance_path"])
     assert provenance_path.exists()
     provenance = json.loads(provenance_path.read_text())
-    assert provenance["duration_s"] > 0
+    # A bare `> 0` is satisfied by any positive literal a writer could
+    # return without ever reading `started_at` (test-critic round 1,
+    # tautology::F1). Tying the lower bound to the 0.2s we actually slept
+    # before calling stop() means only a genuinely time-based duration can
+    # pass: a hardcoded small constant (e.g. 0.001) now fails.
+    assert provenance["duration_s"] >= 0.15
     assert "-p" in provenance["flags"]
 
 
-def test_spawn_failure_writes_provenance(tmp_path):
+@POSIX_ONLY
+def test_poll_observes_running_state(tmp_path):
+    """Plan-critic round 3 minor (missed::F1): the ticket's Non-goals name
+    "start/stop/poll on the run object" as in scope, but no requirement in
+    the plan exercises `Harness.poll()` while a run is genuinely still
+    alive — R3/R4 only observe state after `stop()` or a failed `start()`.
+    This closes that gap with one cheap additional test (not a plan-declared
+    R#); it reuses the same `--sleep` fixture mode R3/R4 already added.
+    """
+    artifacts_dir = tmp_path / "artifacts"
+    run_cwd = tmp_path / "run-cwd"
+    run_cwd.mkdir()
+
+    spec = RunSpec(
+        prompt="Reply with exactly OK",
+        isolation=Isolation.CLEAN,
+        model="haiku",
+        cwd=run_cwd,
+        allow_nonempty_cwd=True,
+        artifacts_dir=artifacts_dir,
+    )
+
+    harness = Harness(
+        store=InMemoryRunStore(),
+        claude_argv=[sys.executable, str(FAKE_CLAUDE), "--sleep", "5"],
+    )
+    started = harness.start(spec)
+    time.sleep(0.2)
+
+    result = harness.poll(started.run_id)
+    assert result.state == RunState.RUNNING
+
+    harness.stop(started.run_id)
+
+
+def test_spawn_failure_writes_provenance(tmp_path, monkeypatch):
     """R4: a `start()` whose `_spawn_detached` raises (bogus binary) still
     writes a provenance record for the FAILED run — the third route into a
     terminal state, distinct from `_finalize`'s two (COMPLETED/FAILED).
@@ -215,6 +255,21 @@ def test_spawn_failure_writes_provenance(tmp_path):
     harness = Harness(
         store=InMemoryRunStore(),
         claude_argv=[str(missing_binary)],
+    )
+
+    # `start()`'s spawn-failure route calls `time.monotonic()` exactly
+    # twice — once to record `started_at` before the spawn attempt, once in
+    # the except block to compute `duration_s` — with nothing else in
+    # between (the raise happens inside `_spawn_detached` itself). Pinning
+    # both return values makes `duration_s` a value this test independently
+    # predicts, not merely a non-negative number: a `_write_provenance` that
+    # never reads `started_at` (test-critic round 1, tautology::F1) would
+    # fail this exact-equality check even though it would still pass a bare
+    # `>= 0`.
+    monotonic_values = iter([1_000.0, 1_042.5])
+    monkeypatch.setattr(
+        "lib_python_harness.harness.time.monotonic",
+        lambda: next(monotonic_values),
     )
 
     with pytest.raises(FileNotFoundError):
@@ -239,4 +294,4 @@ def test_spawn_failure_writes_provenance(tmp_path):
     # not a missing field (it is already a key of the provenance dict on
     # every other route).
     assert provenance["exit_code"] is None
-    assert provenance["duration_s"] >= 0
+    assert provenance["duration_s"] == pytest.approx(42.5)

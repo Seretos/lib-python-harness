@@ -211,3 +211,30 @@ def test_every_all_entry_is_documented_in_readme():
 def test_run_resolves_to_a_function_not_the_facade_module():
     assert callable(lib_python_harness.run)
     assert not inspect.ismodule(lib_python_harness.run)
+
+
+def test_seam_names_resolve_to_the_real_implementations():
+    """test-critic round 1, tautology::F2: `test_expected_names_are_exported`
+    only checks that the six seam names are strings in `__all__`, and
+    `test_every_all_entry_resolves_via_getattr` only checks that the
+    top-level attribute exists — neither ties the exported name to the
+    actual `Provider`/store class the plan's R8 rationale
+    (`Harness(store=..., provider=...)` needing these importable) depends
+    on. A placeholder object bound to the right name would pass both. This
+    adds the missing identity check: each export must be the very class
+    object its owning submodule defines, not a look-alike.
+    """
+    from lib_python_harness.providers.base import LaunchPlan, Provider
+    from lib_python_harness.providers.claude_cli import ClaudeCliProvider
+    from lib_python_harness.runtime.store import (
+        FileRunStore,
+        InMemoryRunStore,
+        RunStore,
+    )
+
+    assert lib_python_harness.Provider is Provider
+    assert lib_python_harness.LaunchPlan is LaunchPlan
+    assert lib_python_harness.ClaudeCliProvider is ClaudeCliProvider
+    assert lib_python_harness.RunStore is RunStore
+    assert lib_python_harness.InMemoryRunStore is InMemoryRunStore
+    assert lib_python_harness.FileRunStore is FileRunStore

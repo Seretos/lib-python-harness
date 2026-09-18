@@ -247,6 +247,109 @@ import lib_python_harness
 print(lib_python_harness.__version__)
 ```
 
+### Provider
+
+The seam a CLI adapter implements: `build_launch_plan(spec, *, session_id,
+run_dir)` turns a `RunSpec` into a `LaunchPlan`, and `parse_events(lines)`
+turns the adapter's own event stream into a `RunResult`. `ClaudeCliProvider`
+is the only implementation this release ships; `Harness(provider=...)` is
+the documented swap seam for a future adapter.
+
+```python
+from pathlib import Path
+
+from lib_python_harness import LaunchPlan, Provider, RunResult, RunSpec
+
+
+def describe(provider: Provider, spec: RunSpec) -> LaunchPlan:
+    return provider.build_launch_plan(spec, session_id="example-session", run_dir=Path("/tmp"))
+```
+
+### LaunchPlan
+
+The fully-built command line a `Provider` wants spawned: `argv` (never
+including the binary itself — `Harness.claude_argv` is prepended at spawn
+time), `cwd`, `env`, and `stdin` (the prompt travels on stdin, never argv).
+
+```python
+from lib_python_harness import LaunchPlan
+
+plan = LaunchPlan(argv=["-p", "--model", "haiku"], cwd="/tmp/example", env={}, stdin="hi")
+print(plan.argv, plan.cwd)
+```
+
+### ClaudeCliProvider
+
+The `Provider` implementation that drives the real `claude` CLI, enforcing
+the `Isolation.CLEAN` recipe (scrubbed env, `--setting-sources ""`,
+`--strict-mcp-config`, no tools, no slash commands) when it builds a
+`LaunchPlan`.
+
+```python
+from pathlib import Path
+import uuid
+
+from lib_python_harness import ClaudeCliProvider, Isolation, RunSpec
+
+provider = ClaudeCliProvider()
+plan = provider.build_launch_plan(
+    RunSpec(prompt="Reply with exactly OK", isolation=Isolation.CLEAN, model="haiku"),
+    session_id=str(uuid.uuid4()),
+    run_dir=Path("/tmp/example-run"),
+)
+print(plan.argv)
+```
+
+### RunStore
+
+The protocol `Harness` uses to persist a run's *record* (metadata — state,
+pid, paths — not its artifacts, which always land on real disk regardless of
+store choice). `Harness(store=...)` takes any `RunStore`; `InMemoryRunStore`
+(the default) and `FileRunStore` are the two implementations this release
+ships.
+
+```python
+from lib_python_harness import InMemoryRunStore, RunStore
+
+
+def run_count(store: RunStore) -> int:
+    return len(store.list())
+
+
+print(run_count(InMemoryRunStore()))
+```
+
+### InMemoryRunStore
+
+The default `RunStore`: no disk I/O, records live only as long as the
+process does. What a plain `Harness()` call uses so it never leaves a stray
+`record.json` around, while still writing a real `provenance.json` file.
+
+```python
+from lib_python_harness import InMemoryRunStore
+
+store = InMemoryRunStore()
+store.put("run-1", {"state": "RUNNING"})
+print(store.get("run-1"))
+```
+
+### FileRunStore
+
+A `RunStore` that persists each run's record to
+`<artifacts_dir>/<run_id>/record.json`, needed when a record living only in
+one process's memory cannot satisfy "the run is inspectable across process
+boundaries".
+
+```python
+import tempfile
+
+from lib_python_harness import FileRunStore
+
+store = FileRunStore(tempfile.mkdtemp())
+store.put("run-1", {"state": "RUNNING"})
+print(store.list())
+```
+
 ## Development
 
 ```bash

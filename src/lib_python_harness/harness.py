@@ -152,6 +152,12 @@ class Harness:
             )
         except Exception:
             record["state"] = transition(record["state"], RunState.FAILED)
+            duration_s = time.monotonic() - started_at
+            record["exit_code"] = None
+            record["duration_s"] = duration_s
+            record["provenance_path"] = self._write_provenance(
+                record, exit_code=None, duration_s=duration_s
+            )
             self.store.put(run_id, record)
             raise
 
@@ -240,8 +246,12 @@ class Harness:
             if proc.returncode is not None:
                 record["exit_code"] = proc.returncode
 
-        record["duration_s"] = time.monotonic() - record.get("started_at", time.monotonic())
+        duration_s = time.monotonic() - record.get("started_at", time.monotonic())
+        record["duration_s"] = duration_s
         record["state"] = transition(record["state"], RunState.CANCELLED)
+        record["provenance_path"] = self._write_provenance(
+            record, exit_code=record.get("exit_code"), duration_s=duration_s
+        )
         self.store.put(run_id, record)
         self._processes.pop(run_id, None)
         return self._record_to_result(record)
@@ -276,6 +286,35 @@ class Harness:
         matches = sorted(base.glob(f"projects/*/{session_id}.jsonl"))
         return matches[0] if matches else None
 
+    def _write_provenance(
+        self, record: dict[str, Any], *, exit_code: int | None, duration_s: float
+    ) -> Path:
+        """Write `provenance.json` for `record` and return its path. The one
+        writer for all three terminal-state routes (`_finalize`'s COMPLETED/
+        FAILED, `stop()`'s CANCELLED, and `start()`'s spawn-failure FAILED) —
+        every field below is already on the record by the time any of the
+        three call it; `exit_code`/`duration_s` are parameters because the
+        three routes compute them differently (a spawned-but-never-ran
+        process has no exit code at all, hence `None`, not a missing field).
+        """
+        provenance = {
+            "flags": record["argv"],
+            "cwd": str(record["cwd"]),
+            "model": record.get("model"),
+            "effort": record.get("effort"),
+            "prompt_sha256": record.get("prompt_sha256"),
+            "system_prompt_sha256": record.get("system_prompt_sha256"),
+            "claude_version": self._claude_version(),
+            "exit_code": exit_code,
+            "duration_s": duration_s,
+            "scrubbed_env": record.get("scrubbed_env", []),
+            "allow_nonempty_cwd": record.get("allow_nonempty_cwd", False),
+            "session_id": record.get("session_id"),
+        }
+        provenance_path = Path(record["run_dir"]) / "provenance.json"
+        provenance_path.write_text(json.dumps(provenance, indent=2))
+        return provenance_path
+
     def _finalize(self, run_id: str, record: dict[str, Any], proc: subprocess.Popen) -> None:
         events_path = Path(record["events_path"])
         exit_code = proc.returncode
@@ -295,22 +334,9 @@ class Harness:
         session_id = record["session_id"]
         transcript_path = self._resolve_transcript_path(session_id)
 
-        provenance = {
-            "flags": record["argv"],
-            "cwd": str(record["cwd"]),
-            "model": record.get("model"),
-            "effort": record.get("effort"),
-            "prompt_sha256": record.get("prompt_sha256"),
-            "system_prompt_sha256": record.get("system_prompt_sha256"),
-            "claude_version": self._claude_version(),
-            "exit_code": exit_code,
-            "duration_s": duration_s,
-            "scrubbed_env": record.get("scrubbed_env", []),
-            "allow_nonempty_cwd": record.get("allow_nonempty_cwd", False),
-            "session_id": session_id,
-        }
-        provenance_path = Path(record["run_dir"]) / "provenance.json"
-        provenance_path.write_text(json.dumps(provenance, indent=2))
+        provenance_path = self._write_provenance(
+            record, exit_code=exit_code, duration_s=duration_s
+        )
 
         new_state = RunState.FAILED if (parse_error is not None or exit_code != 0) else RunState.COMPLETED
         record["state"] = transition(record["state"], new_state)
