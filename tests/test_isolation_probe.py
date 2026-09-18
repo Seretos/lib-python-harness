@@ -101,15 +101,26 @@ def test_clean_child_is_isolated(tmp_path):
 
         # 4b. Closes both open plan-critic notes on this requirement: run the
         #     full CLEAN flag set again, this time directly in P — a
-        #     caller-supplied, content-empty cwd whose *slug* now maps onto a
-        #     project D with real, populated memory. This is the case a
-        #     fresh-mkdtemp()-only check (H) never exercises.
+        #     caller-supplied cwd whose *slug* now maps onto a project D with
+        #     real, populated memory. This is the case a fresh-mkdtemp()-only
+        #     check (H) never exercises. allow_nonempty_cwd=True is required
+        #     here: step 3's positive control runs *without*
+        #     --setting-sources "", so it loads this machine's own user
+        #     settings — which, on a machine with a globally-configured
+        #     Serena MCP plugin, has the observed, reproducible side effect
+        #     of writing a `.serena/` project cache into P's cwd. That is a
+        #     real, verified (not assumed) consequence of the control step
+        #     itself, not a defect in the CLEAN cwd-emptiness check below (a
+        #     UnsafeCwdError from a genuinely unclean cwd is exactly what
+        #     that check exists to catch) — the opt-out is what step 3
+        #     legitimately requires step 4b to use.
         clean_in_p = harness.run(
             RunSpec(
                 prompt=STIMULUS,
                 isolation=Isolation.CLEAN,
                 model="haiku",
                 cwd=planted_project,
+                allow_nonempty_cwd=True,
             )
         )
         clean_p_reply = clean_in_p.text
