@@ -37,6 +37,16 @@ EXPECTED_NAMES = {
     "IllegalTransitionError",
     "RunIdentityUnverifiedError",
     "UnsafeCwdError",
+    # The Provider/store swap seam: Harness(store=..., provider=...) takes
+    # these as parameters, so the documented seam is unusable without them
+    # (plan R8 — round 1's "exports stay exactly as they are" is reversed
+    # here, at 0.1.0, the release that defines the surface).
+    "Provider",
+    "LaunchPlan",
+    "ClaudeCliProvider",
+    "RunStore",
+    "InMemoryRunStore",
+    "FileRunStore",
 }
 
 # Prose/keyword matching was tried three times (round 3: bare substring;

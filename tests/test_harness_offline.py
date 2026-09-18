@@ -1,4 +1,4 @@
-"""Offline driving tests for R5 and R7.
+"""Offline driving tests for R5, R7, R3 and R4.
 
 R5 — `Harness.stop(run_id)` on a COMPLETED run raises `IllegalTransitionError`
 at the façade, before any signal is sent (no early return for terminal
@@ -8,13 +8,24 @@ R7 — a real spawn/parse/persist cycle (against tests/fixtures/fake_claude.py,
 substituted for the `claude` binary so this runs with no CLI and no auth)
 writes a provenance record whose every field matches a value this test
 computes independently.
+
+R3 — `start()` then `stop()` ends CANCELLED, with a non-surviving PID and a
+partial events log, proven offline (no live `claude` needed) by driving
+`fake_claude.py --sleep` as the child instead of the real CLI.
+
+R4 — every terminal state writes a provenance record: both the CANCELLED
+route (`stop()`) and the spawn-failure FAILED route (`start()`'s
+`_spawn_detached` raising) are gaps `_finalize`'s unconditional write does
+not cover, per plan Approach / Premises verified.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -27,6 +38,11 @@ from lib_python_harness.providers.base import Isolation, RunSpec
 from lib_python_harness.providers.claude_cli import CLEAN_ARGV_FLAGS
 
 FAKE_CLAUDE = Path(__file__).parent / "fixtures" / "fake_claude.py"
+
+POSIX_ONLY = pytest.mark.skipif(
+    os.name != "posix",
+    reason="process control (os.kill, SIGTERM/SIGKILL) is POSIX-only; see runtime/process.py",
+)
 
 
 def test_stop_on_completed_run_raises(monkeypatch):
@@ -106,3 +122,121 @@ def test_provenance_fields_from_spawned_run(tmp_path):
     assert events_path.exists()
     assert events_path.stat().st_size > 0
     assert events_path.parent == provenance_path.parent
+
+
+@POSIX_ONLY
+def test_stop_cancels_running_child(tmp_path):
+    """R3 + R4: `stop()` on a still-RUNNING run kills the child, records
+    CANCELLED, and writes a provenance record.
+
+    Drives `fake_claude.py --sleep` (a fixture mode that does not exist yet)
+    so there is a real child still alive when `stop()` runs — the plain
+    fixture exits the instant it emits its terminal event, so nothing would
+    be left to cancel.
+
+    The pre-stop liveness check below reads `proc.poll()` on the harness's
+    own `Popen` handle, not `_pid_status(pid, start_time)` as the plan's
+    literal wording suggests — measured during this round: an exited-but-
+    not-yet-reaped child is still a zombie holding its pid, so
+    `_pid_status` (which only compares process identity/start-time) reads
+    it as "alive" too, defeating the RED this assertion needs. `proc.poll()`
+    reaps-and-reports in one step and is the only check that actually tells
+    "still running" apart from "exited, not yet reaped".
+    """
+    artifacts_dir = tmp_path / "artifacts"
+    run_cwd = tmp_path / "run-cwd"
+    run_cwd.mkdir()
+
+    spec = RunSpec(
+        prompt="Reply with exactly OK",
+        isolation=Isolation.CLEAN,
+        model="haiku",
+        cwd=run_cwd,
+        allow_nonempty_cwd=True,
+        artifacts_dir=artifacts_dir,
+    )
+
+    harness = Harness(
+        store=InMemoryRunStore(),
+        claude_argv=[sys.executable, str(FAKE_CLAUDE), "--sleep", "5"],
+    )
+    started = harness.start(spec)
+    record = harness.store.get(started.run_id)
+    proc = harness._processes[started.run_id]
+
+    # Give the child a moment to either still be sleeping (once --sleep
+    # exists) or to have already exited (today, since --sleep is ignored).
+    time.sleep(0.2)
+    assert proc.poll() is None, (
+        "fake_claude did not stay alive long enough for stop() to cancel it "
+        "— test_stop_cancels_running_child requires fake_claude.py's "
+        "--sleep mode to keep the child alive (RED until it exists)"
+    )
+
+    result = harness.stop(started.run_id)
+
+    assert result.state == RunState.CANCELLED
+    with pytest.raises(ProcessLookupError):
+        os.kill(record["pid"], 0)
+
+    events_path = Path(record["events_path"])
+    assert events_path.exists()
+    assert events_path.stat().st_size > 0
+
+    # R4: the CANCELLED route must write provenance too, same as the
+    # COMPLETED/FAILED routes _finalize already covers.
+    record_after = harness.store.get(started.run_id)
+    provenance_path = Path(record_after["provenance_path"])
+    assert provenance_path.exists()
+    provenance = json.loads(provenance_path.read_text())
+    assert provenance["duration_s"] > 0
+    assert "-p" in provenance["flags"]
+
+
+def test_spawn_failure_writes_provenance(tmp_path):
+    """R4: a `start()` whose `_spawn_detached` raises (bogus binary) still
+    writes a provenance record for the FAILED run — the third route into a
+    terminal state, distinct from `_finalize`'s two (COMPLETED/FAILED).
+    """
+    artifacts_dir = tmp_path / "artifacts"
+    run_cwd = tmp_path / "run-cwd"
+    run_cwd.mkdir()
+    missing_binary = tmp_path / "no-such-claude"
+
+    spec = RunSpec(
+        prompt="Reply with exactly OK",
+        isolation=Isolation.CLEAN,
+        model="haiku",
+        cwd=run_cwd,
+        allow_nonempty_cwd=True,
+        artifacts_dir=artifacts_dir,
+    )
+
+    harness = Harness(
+        store=InMemoryRunStore(),
+        claude_argv=[str(missing_binary)],
+    )
+
+    with pytest.raises(FileNotFoundError):
+        harness.start(spec)
+
+    records = harness.store.list()
+    assert len(records) == 1
+    record = records[0]
+    assert record["state"] == RunState.FAILED
+
+    provenance_path = Path(record["provenance_path"])
+    assert provenance_path.exists()
+    provenance = json.loads(provenance_path.read_text())
+
+    assert str(missing_binary) in provenance["flags"]
+    assert Path(provenance["cwd"]) == run_cwd
+    assert provenance["model"] == "haiku"
+    assert provenance["prompt_sha256"] == hashlib.sha256(
+        spec.prompt.encode()
+    ).hexdigest()
+    # No process ever existed on this route — exit_code is genuinely null,
+    # not a missing field (it is already a key of the provenance dict on
+    # every other route).
+    assert provenance["exit_code"] is None
+    assert provenance["duration_s"] >= 0

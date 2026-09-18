@@ -4,14 +4,20 @@ requires_claude: needs the installed `claude` CLI + subscription auth.
 Excluded from the default `python -m pytest` run (see pyproject.toml's
 addopts); run explicitly with `python -m pytest -m requires_claude -k isolated -q`.
 
-Extends the plan's described sequence with one extra run (see the two open
-plan-critic notes on this requirement): after planting the nonce into P's own
-project memory, CLEAN is run *again*, directly against P itself (a
-caller-supplied, content-empty cwd that nonetheless now maps onto a project
-whose memory is populated) — not only against the fresh H. That is the one
-case the discovery-in-an-empty-cwd design does not otherwise exercise: a
-caller-supplied empty cwd whose *slug* happens to collide with a populated
-project.
+Extends the plan's described sequence with one extra run: after planting the
+nonce into P's own project memory, CLEAN is run *again*, directly against P
+itself (a caller-supplied, content-empty cwd that nonetheless now maps onto a
+project whose memory is populated) — not only against the fresh H. That is
+the one case the discovery-in-an-empty-cwd design does not otherwise
+exercise: a caller-supplied empty cwd whose *slug* happens to collide with a
+populated project.
+
+This extra run (arm 4b) is a measurement, not an assertion of a guaranteed
+invariant — comment 5734748150 narrowed the no-auto-memory guarantee to the
+harness's own fresh cwd (`claude_cli.py:66-72`; `README.md:87-96`), which
+this run does not use. A caller-supplied cwd whose slug maps onto an already
+populated project is a known, measured limitation: the reply is printed for
+a human to read, not asserted against.
 """
 from __future__ import annotations
 
@@ -99,8 +105,7 @@ def test_clean_child_is_isolated(tmp_path):
         )
         clean_h_reply = clean_in_h.text
 
-        # 4b. Closes both open plan-critic notes on this requirement: run the
-        #     full CLEAN flag set again, this time directly in P — a
+        # 4b. Run the full CLEAN flag set again, this time directly in P — a
         #     caller-supplied cwd whose *slug* now maps onto a project D with
         #     real, populated memory. This is the case a fresh-mkdtemp()-only
         #     check (H) never exercises. allow_nonempty_cwd=True is required
@@ -114,6 +119,13 @@ def test_clean_child_is_isolated(tmp_path):
         #     UnsafeCwdError from a genuinely unclean cwd is exactly what
         #     that check exists to catch) — the opt-out is what step 3
         #     legitimately requires step 4b to use.
+        #
+        #     Known, measured limitation (triage-rejected as a guarantee —
+        #     see module docstring): a caller-supplied cwd whose slug
+        #     collides with an already-populated project is NOT covered by
+        #     the no-auto-memory guarantee, which is scoped to the harness's
+        #     own fresh cwd only. The reply is printed below for a human to
+        #     read, not asserted against.
         clean_in_p = harness.run(
             RunSpec(
                 prompt=STIMULUS,
@@ -148,11 +160,12 @@ def test_clean_child_is_isolated(tmp_path):
         # created, so it has no project memory to load.
         assert not (clean_in_h.transcript_path.parent / "memory").exists()
 
-        # Closing the two open plan-critic notes: CLEAN in P (memory now
-        # populated) must not leak the nonce either — this is the only
-        # place in this test that actually runs CLEAN against a cwd whose
-        # own project memory holds the planted fact.
-        assert nonce not in clean_p_reply
+        # arm 4b (clean_p_reply) is deliberately not asserted against: the
+        # no-auto-memory guarantee is scoped to the harness's own fresh cwd,
+        # not to a caller-supplied cwd whose slug happens to collide with an
+        # already-populated project (see module docstring and the 4b comment
+        # above) — this run is a printed measurement of that known
+        # limitation, not a requirement this suite enforces.
     finally:
         if memory_dir.exists():
             shutil.rmtree(memory_dir)

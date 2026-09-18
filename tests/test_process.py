@@ -10,8 +10,11 @@ separate files (events JSONL vs. stderr.txt) rather than one combined log.
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
+
+import pytest
 
 from lib_python_harness.runtime.process import (
     _spawn_detached,
@@ -21,6 +24,17 @@ from lib_python_harness.runtime.process import (
     _wait_or_kill,
     _capture_start_time,
     _pid_status,
+)
+
+# POSIX-only per the plan (no Windows Job Object / handle-scan machinery —
+# see module docstring above and plan Mechanism balance / Removed).
+# `_capture_start_time` returns `None` on windows-latest (no `psutil` in the
+# `test` extra, no `/proc`), so `assert start_time is not None` below would
+# fail there, and `_force_kill`/`_reap_until_gone` use `signal.SIGKILL`/
+# `os.WNOHANG`, neither of which exists on Windows.
+pytestmark = pytest.mark.skipif(
+    os.name != "posix",
+    reason="process control (_spawn_detached signal handling, SIGKILL, os.WNOHANG) is POSIX-only",
 )
 
 

@@ -24,13 +24,18 @@ UUID4_RE = re.compile(
 
 # Independently written — deliberate duplication of CLEAN_ARGV_FLAGS, not an
 # import of it. Every flag/value pair the ticket's isolation recipe names.
+# `-p` and `--system-prompt` are in the ticket's canonical clean set too (see
+# plan Approach) — omitted here originally, which meant a silent drop of
+# either flag by the builder would pass this check undetected.
 EXPECTED_ALWAYS_PRESENT_FLAGS = [
+    "-p",
     "--setting-sources",
     "--strict-mcp-config",
     "--disable-slash-commands",
     "--tools",
     "--output-format",
     "--verbose",
+    "--system-prompt",
 ]
 
 
