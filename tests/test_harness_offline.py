@@ -71,9 +71,15 @@ def test_provenance_fields_from_spawned_run(tmp_path):
     )
     result = harness.run(spec)
 
-    run_dir = artifacts_dir / result.run_id
-    provenance_path = run_dir / "provenance.json"
-    events_path = run_dir / "events.jsonl"
+    # events_path/provenance_path come from the harness's own persisted
+    # record (the same `harness.store.get(run_id)[...]` shape already used
+    # by tests/test_harness_end_to_end.py), not from test-local path
+    # arithmetic — otherwise `events_path.parent == provenance_path.parent`
+    # below would just be comparing a test-built variable with itself
+    # (tautology::F9, test-critic round 4).
+    record = harness.store.get(result.run_id)
+    provenance_path = Path(record["provenance_path"])
+    events_path = Path(record["events_path"])
 
     assert provenance_path.exists()
     provenance = json.loads(provenance_path.read_text())

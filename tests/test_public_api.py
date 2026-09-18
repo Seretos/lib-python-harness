@@ -6,6 +6,7 @@ resolve to a function, not the façade module.
 """
 from __future__ import annotations
 
+import ast
 import inspect
 import re
 from pathlib import Path
@@ -21,6 +22,9 @@ README = Path(__file__).resolve().parent.parent / "README.md"
 # gives a name a heading with no body, fails it.
 _README_HEADING_RE = re.compile(r"^#{2,4}\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s*$", re.MULTILINE)
 
+# A ```python fenced block inside a section's prose.
+_PYTHON_FENCE_RE = re.compile(r"```python\s*\n(.*?)```", re.DOTALL)
+
 EXPECTED_NAMES = {
     "__version__",
     "run",
@@ -35,76 +39,71 @@ EXPECTED_NAMES = {
     "UnsafeCwdError",
 }
 
-# Content-bearing details each identifier's README section must mention,
-# pulled verbatim from the plan's own description of that identifier's real
-# behaviour (plan.md "Approach", lines ~40-90) — not a generic word count
-# and not a single guessable keyword. See tautology finding F1 (round 3):
-# a heading followed by a filler sentence containing one required keyword
-# ("Raised about the cwd; empty repo handling described elsewhere.") passed
-# the previous version of this check without documenting any real behaviour.
+# Prose/keyword matching was tried three times (round 3: bare substring;
+# round 4 x2: heading+word-count, then multiple required keywords with a
+# minimum count) and failed the tautology critique every time — the test
+# critic's round-4 note: "documented accurately" cannot be verified by
+# prose/keyword matching alone, because filler prose can always be
+# constructed to contain any fixed set of keywords without actually being
+# correct documentation (tautology::F14).
 #
-# Each entry is (terms, min_required): the README section for that name
-# must contain at least `min_required` of the *distinct* terms in `terms`.
-# The terms are specific field names, method names, enum member names, or
-# raising conditions the plan names for that identifier — e.g. real
-# RunSpec fields (prompt, cwd, allow_nonempty_cwd, timeout, ...), real
-# Harness method names (start, poll, stop, cleanup), real RunState member
-# names (CREATED, RUNNING, COMPLETED, FAILED, CANCELLED). Requiring several
-# of these together (not one) makes a generic filler sentence implausible:
-# it would have to accidentally combine multiple specific, unrelated
-# technical terms the plan uses for that exact identifier.
-REQUIRED_README_DETAILS: dict[str, tuple[tuple[str, ...], int]] = {
-    # No behavioural surface beyond "the installed version string" — one
-    # term is the whole content available for this name.
-    "__version__": (("version",), 1),
-    # Approach: "__init__.py also exports a module-level run(spec)
-    # delegating to Harness().run(spec)".
-    "run": (("delegat", "harness", "runspec"), 2),
+# The mechanism below is structurally different: each identifier's README
+# section must contain a ```python fenced code block that (a) is
+# syntactically valid Python (`ast.parse` must not raise) and (b) whose AST
+# genuinely references the identifier by name — as a Name/Attribute/Call
+# node spelling the identifier itself (e.g. `Harness()`, `RunSpec(...)`,
+# `RunState.COMPLETED`, `except IllegalTransitionError:`,
+# `lib_python_harness.__version__`). Prose can say the right words about the
+# wrong behaviour; it cannot produce valid Python syntax that happens to use
+# a name it never actually demonstrates.
+#
+# For identifiers with real methods/members the plan names (Harness,
+# RunResult, Isolation, RunState), the block must *additionally* reference
+# at least one of those real names as an attribute — e.g.
+# `Harness().stop(run_id, timeout=10.0)` (attr "stop") or a
+# `result: RunResult` annotated example accessing `result.state`. This
+# blocks the degenerate one-liner `Harness` (a bare Name with no real
+# member/method use) from being accepted as documentation.
+REQUIRED_README_METHODS: dict[str, frozenset[str]] = {
     # Approach: "harness.py ... exposes Harness with run(spec) (= start +
     # wait, one code path), start, poll, stop(run_id, timeout=10.0),
     # cleanup(run_id, remove_cwd=False)".
-    "Harness": (("start", "poll", "stop", "cleanup"), 3),
-    # Approach: "RunSpec (prompt, isolation, model, effort, system_prompt,
-    # json_schema, cwd, allow_nonempty_cwd, artifacts_dir, timeout)".
-    "RunSpec": (
-        ("prompt", "cwd", "allow_nonempty_cwd", "timeout", "effort",
-         "system_prompt", "json_schema", "artifacts_dir"),
-        3,
-    ),
+    "Harness": frozenset({"run", "start", "poll", "stop", "cleanup"}),
     # R1/R7: RunResult-carrying fields named in the plan's own assertions
     # — non-empty session_id, existing transcript_path, state == COMPLETED,
     # duration < 60s / duration_s.
-    "RunResult": (("session", "transcript", "duration", "state"), 3),
-    # Approach: "Isolation (only CLEAN)" plus what CLEAN actually strips
-    # per R3/ClaudeCliProvider — no tools, no inherited settings sources,
-    # no auto-memory load.
-    "Isolation": (("clean", "tools", "memory", "settings"), 2),
+    "RunResult": frozenset({"session_id", "transcript_path", "state", "duration_s"}),
+    # Approach: "Isolation (only CLEAN)".
+    "Isolation": frozenset({"CLEAN"}),
     # Approach: "RunState enum — CREATED, RUNNING, COMPLETED, FAILED,
     # CANCELLED".
-    "RunState": (
-        ("created", "running", "completed", "failed", "cancelled"),
-        3,
-    ),
-    # Approach: "HarnessError base + IllegalTransitionError +
-    # RunIdentityUnverifiedError + UnsafeCwdError — four types" — a
-    # documented base must actually name at least two of its siblings.
-    "HarnessError": (
-        ("illegaltransitionerror", "runidentityunverifiederror",
-         "unsafecwderror"),
-        2,
-    ),
-    # Approach: "transition() raises IllegalTransitionError outside it"
-    # and "a stop() on a COMPLETED run raises before any signal logic is
-    # reached" — the raising condition, not just the class name.
-    "IllegalTransitionError": (("completed", "signal", "stop"), 2),
-    # Approach: "None is acted on only while this process still holds the
-    # child's Popen, else stop() raises RunIdentityUnverifiedError" — the
-    # risk being guarded against is signalling a recycled pid (R4).
-    "RunIdentityUnverifiedError": (("popen", "pid", "recycled"), 2),
-    # Approach: "must hold no .git in it or any ancestor, and must be
-    # empty, else UnsafeCwdError".
-    "UnsafeCwdError": (("git", "empty", "ancestor"), 2),
+    "RunState": frozenset({"CREATED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"}),
 }
+
+
+def _code_blocks(body: str) -> list[str]:
+    return _PYTHON_FENCE_RE.findall(body)
+
+
+def _references_identifier(tree: ast.AST, identifier: str) -> bool:
+    """True if the AST contains a Name/Attribute node literally spelling
+    `identifier` — i.e. the code actually uses that name, not merely prose
+    that mentions it."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == identifier:
+            return True
+        if isinstance(node, ast.Attribute) and node.attr == identifier:
+            return True
+    return False
+
+
+def _references_member(tree: ast.AST, member_names: frozenset[str]) -> bool:
+    """True if the AST accesses one of `member_names` as a real attribute
+    (`.stop`, `.state`, `.CLEAN`, ...) — not just as prose text."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in member_names:
+            return True
+    return False
 
 
 def test_all_is_sorted_and_duplicate_free():
@@ -146,22 +145,56 @@ def test_every_all_entry_is_documented_in_readme():
             f"{name} is exported but README.md has no heading section "
             f"for it (expected a '### {name}' heading followed by prose)"
         )
-        detail = REQUIRED_README_DETAILS.get(name)
-        assert detail is not None, (
-            f"{name} is exported but this test has no REQUIRED_README_DETAILS "
-            f"entry for it — add the specific behavioural details its README "
-            f"section must mention before trusting its documentation"
+
+        blocks = _code_blocks(body)
+        assert blocks, (
+            f"{name}'s README section has no ```python fenced code block — "
+            f"a code example is the documentation evidence this check "
+            f"requires (see tautology::F14: keyword-matched prose can "
+            f"always be gamed by filler text, a code example much less so)"
         )
-        required_terms, min_required = detail
-        body_lower = body.lower()
-        matched = [term for term in required_terms if term in body_lower]
-        assert len(matched) >= min_required, (
-            f"README.md's section for {name} mentions only {matched} of the "
-            f"required technical details {required_terms} (needs at least "
-            f"{min_required} distinct terms) — a single guessable keyword, or "
-            f"generic filler prose, must not be able to satisfy this check; "
-            f"the section must name several of {name}'s actual fields/"
-            f"methods/members/raising-conditions from the plan"
+
+        parse_errors: list[str] = []
+        member_names = REQUIRED_README_METHODS.get(name, frozenset())
+        found_valid_block = False
+        found_identifier_reference = False
+        found_member_reference = not member_names  # vacuously true if none required
+
+        for block in blocks:
+            try:
+                tree = ast.parse(block)
+            except SyntaxError as exc:
+                parse_errors.append(str(exc))
+                continue
+            references_identifier = _references_identifier(tree, name)
+            references_member = not member_names or _references_member(tree, member_names)
+            found_identifier_reference = found_identifier_reference or references_identifier
+            found_member_reference = found_member_reference or references_member
+            if references_identifier and references_member:
+                found_valid_block = True
+                break
+
+        assert not parse_errors or found_valid_block, (
+            f"{name}'s README ```python block(s) are not valid Python — "
+            f"ast.parse failed: {parse_errors}"
+        )
+        assert found_identifier_reference, (
+            f"{name}'s README ```python code block(s) never use `{name}` as "
+            f"actual Python syntax (a call, instantiation, or attribute "
+            f"access) — e.g. `{name}(...)` or `{name}.SOMEMEMBER` — prose "
+            f"that merely mentions the name is not enough"
+        )
+        assert found_member_reference, (
+            f"{name}'s README ```python code block(s) use `{name}` but "
+            f"never access one of its real members {sorted(member_names)} "
+            f"as an attribute (e.g. `{name}().{sorted(member_names)[0]}` or "
+            f"`{name}.{sorted(member_names)[0]}`) — a bare mention of the "
+            f"name with no real usage is not documentation"
+        )
+        assert found_valid_block, (
+            f"{name}'s README has no single ```python code block that is "
+            f"both valid Python and references `{name}` (and its real "
+            f"members {sorted(member_names)}) together"
         )
 
 
