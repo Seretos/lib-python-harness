@@ -350,6 +350,177 @@ store.put("run-1", {"state": "RUNNING"})
 print(store.list())
 ```
 
+## Agent dispatch (Isolation.INHERIT)
+
+Ticket #2's surface: discover every Claude Code subagent definition
+available in this session (project `.claude/agents/*.md`, user
+`<config>/agents/*.md`, enabled-plugin `agents/*.md`), and dispatch one as a
+child `claude` process under `Isolation.INHERIT` — the parent's own cwd,
+CLAUDE.md discovery, settings, permission mode and MCP servers, plus the
+definition's own fields.
+
+```python
+from lib_python_harness import HostContext, discover, resolve, run
+
+context = HostContext(cwd="/path/to/project")
+context.complete()
+
+definitions = discover(context)
+definition = definitions["reviewer"]
+
+spec = resolve(definition, context)
+result = run(spec)
+print(result.text)
+```
+
+### AgentDefinition
+
+One subagent, normalized from its `.md` frontmatter: the documented
+camelCase fields as snake_case attributes, plus `body` (everything after
+the frontmatter fence), `source_scope` (`"project"` | `"user"` |
+`"plugin"`), `path`, and `qualified_name` (`name` at project/user scope,
+`f"{plugin}:{name}"` at plugin scope — the key `discover()` returns).
+
+```python
+from pathlib import Path
+
+from lib_python_harness import AgentDefinition
+
+definition = AgentDefinition(
+    name="reviewer",
+    description="Reviews code",
+    body="You are a careful code reviewer.",
+    source_scope="project",
+    path=Path("/repo/.claude/agents/reviewer.md"),
+    qualified_name="reviewer",
+)
+print(definition.qualified_name)
+```
+
+### DefinitionSource
+
+The protocol `discover()` walks: anything with an `iter_definitions()`
+method yielding `AgentDefinition`s. `ClaudeMarkdownSource` is the only
+implementation this release ships.
+
+```python
+from lib_python_harness import AgentDefinition, DefinitionSource
+
+
+def count_definitions(source: DefinitionSource) -> int:
+    return len(list(source.iter_definitions()))
+```
+
+### ClaudeMarkdownSource
+
+Walks one directory (non-recursively, sorted) for `*.md` agent-definition
+files. `discover()` builds one per scope (project/user/each enabled
+plugin); a missing directory yields nothing, not an error.
+
+```python
+from lib_python_harness import ClaudeMarkdownSource
+
+source = ClaudeMarkdownSource("/repo/.claude/agents", scope="project")
+for definition in source.iter_definitions():
+    print(definition.qualified_name)
+```
+
+### HostContext
+
+A snapshot of the parent Claude Code session: `cwd`, `model`,
+`permission_mode`, `effort`, `mcp_servers`, `enabled_plugins`.
+`complete()` fills `model` (from the session transcript's last assistant
+turn) and `enabled_plugins` (from the merged settings files) when unset —
+fields already set are never overwritten. `mcp_servers` is caller-supplied
+only; `complete()` never populates it (collecting the parent's actually
+active MCP servers is a later ticket's job).
+
+```python
+from lib_python_harness import HostContext
+
+context = HostContext(cwd="/repo", session_id="example-session-id")
+context.complete()
+print(context.model, context.enabled_plugins)
+```
+
+### discover
+
+Every subagent Claude Code would offer in this session, keyed by
+`qualified_name` — project, then user, then each enabled plugin, first
+writer of a name wins (so a project agent shadows a same-named user or
+plugin one).
+
+```python
+from lib_python_harness import HostContext, discover
+
+context = HostContext(cwd="/repo")
+for qualified_name, definition in discover(context).items():
+    print(qualified_name, definition.description)
+```
+
+### resolve
+
+Turns one `AgentDefinition` plus a `HostContext` into a `RunSpec` under
+`Isolation.INHERIT`, once: `model`/`permission_mode`/`effort` are
+definition-else-context; `tools`/`disallowed_tools`/`skills`/`max_turns`
+always come from the definition; `omit_claude_md`/`hooks`/`mcp_servers` come
+from the definition too, but are dropped at plugin scope (a documented
+assumption about how the parent Claude Code loads plugin agents, not
+independently verified). The returned `RunSpec` is ready for `run()`.
+
+```python
+from lib_python_harness import HostContext, discover, resolve
+
+context = HostContext(cwd="/repo")
+context.complete()
+definition = next(iter(discover(context).values()))
+spec = resolve(definition, context)
+print(spec.agent_name, spec.isolation)
+```
+
+#### Frontmatter field → dispatch carrier
+
+`resolve()`'s `RunSpec` is emitted one of two ways
+(`providers.claude_cli.dispatch_mode`, whole-definition, never per-field):
+**payload** (`--agents '{"<name>": {...}}'` + `--agent <name>`) when every
+field the definition sets fits the `--agents` JSON schema; **materialized**
+(`--add-dir <dir>` + `--agent <stem>`, a real `.md` file with full
+frontmatter under `<dir>/.claude/agents/<stem>.md`) the moment one field
+does not (verified against the real CLI: `hooks`/`mcpServers` are always
+rejected by the JSON schema, and `tools`/`disallowedTools` need a JSON
+array rather than the scalar frontmatter carries — both cases still work,
+just through the materialized path or a converted array).
+
+| Frontmatter field | `payload` carrier            | `materialized` carrier | Notes                                   |
+| ------------------ | ----------------------------- | ----------------------- | ---------------------------------------- |
+| `model`             | top-level `--model`           | `model:`                 | `model: inherit` passes through literally |
+| `permissionMode`    | top-level `--permission-mode` | `permissionMode:`        | dropped at plugin scope                  |
+| `effort`            | top-level `--effort`          | (not carried)            | definition-else-context                  |
+| `tools`             | `--agents` `tools` (as array) | `tools:` (scalar)        | never a top-level `--allowedTools`       |
+| `disallowedTools`   | `--agents` `disallowedTools`  | `disallowedTools:`       | never a top-level `--disallowedTools`    |
+| `skills`            | `--agents` `skills`           | `skills:`                |                                           |
+| `maxTurns`          | `--agents` `maxTurns`         | `maxTurns:`              | never a top-level `--max-turns` (no such flag) |
+| `hooks`             | (forces `materialized`)       | `hooks:`                 | dropped at plugin scope                  |
+| `mcpServers`        | (forces `materialized`)       | `mcpServers:`            | dropped at plugin scope; also drives top-level `--mcp-config` when non-empty |
+| `omitClaudeMd`      | top-level `--setting-sources` | `omitClaudeMd:`          | drops `project` from `--setting-sources` (`user,local` instead of `user,project,local`); live-verified — no `--settings instructionFiles` key has any observable effect on CLAUDE.md loading against the real CLI; dropped at plugin scope. Known trade-off: also drops project-level `.claude/settings.json`, since "project" carries both |
+| `memory`, `background`, `color`, `initialPrompt`, `isolation` | not carried | not carried | parsed by the frontmatter reader, silently dropped by `load_agent_definition` — no `RunSpec` field exists for them |
+
+### FrontmatterError
+
+Raised by the hand-rolled frontmatter parser when a `.md` file's `---`
+header is genuinely malformed (e.g. an opening fence with no closing
+fence) — never for a file that merely omits recognised fields, which loads
+with a fallback description instead.
+
+```python
+from lib_python_harness import FrontmatterError
+
+try:
+    raise FrontmatterError("frontmatter fence not closed")
+except FrontmatterError as exc:
+    print(f"malformed agent definition: {exc}")
+```
+
 ## Development
 
 ```bash

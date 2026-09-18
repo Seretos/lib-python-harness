@@ -78,9 +78,15 @@ def test_colon_in_agent_name_becomes_double_underscore_in_filename_and_name_fiel
 
 
 def test_run_dir_need_not_exist_beforehand(tmp_path):
+    # test-critic round 1, tautology::F7: the removed `assert not
+    # run_dir.exists()` ran *before* materialize_agent_dir was ever called,
+    # over a path this test itself never created — it could not come out
+    # false under any implementation, so it was not evidence of anything.
+    # The real content of the edge case is `Path(dest).exists()` below,
+    # which does exercise `mkdir(parents=True, ...)` on a genuinely
+    # multi-level-missing run_dir.
     spec = _resolved_spec()
     run_dir = tmp_path / "does" / "not" / "exist" / "yet"
-    assert not run_dir.exists()
 
     dest = materialize_agent_dir(spec, run_dir)
 

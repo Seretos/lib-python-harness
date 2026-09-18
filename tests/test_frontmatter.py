@@ -183,3 +183,28 @@ def test_dump_frontmatter_round_trips_through_parse_frontmatter():
     parsed_fields, parsed_body = parse_frontmatter(text)
     assert parsed_fields == fields
     assert parsed_body == body
+
+
+def test_dump_frontmatter_emits_real_yaml_style_lines_not_json():
+    # test-critic round 1, tautology::F5: a round trip through the parser's
+    # *own* inverse proves only that dump and parse are mutually
+    # consistent — a dump/parse pair that agreed on emitting
+    # `json.dumps(fields)` inside the fence would pass the round-trip test
+    # above while producing a file Claude Code's own agent loader (a real
+    # YAML-ish parser, not this module) could not read, defeating the
+    # entire purpose of the materialized carrier (plan R8). This pins the
+    # actual emitted shape against literals written independently of
+    # dump_frontmatter's own implementation.
+    fields = {"name": "round-trip", "tools": "Read, Glob"}
+    text = dump_frontmatter(fields, "Body.\n")
+
+    assert text.startswith("---\n")
+    lines = text.split("\n")
+    assert "name: round-trip" in lines
+    assert "tools: Read, Glob" in lines
+    # Not a JSON object anywhere in the fenced header: a json.dumps(fields)
+    # implementation would produce a single '{"name": ...}' line instead of
+    # the two plain 'key: value' lines asserted above.
+    header = text.split("---\n", 2)[1]
+    assert "{" not in header
+    assert "}" not in header

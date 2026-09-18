@@ -68,8 +68,23 @@ def test_inherit_argv_carries_model_permission_mode_and_flags(tmp_path):
 
     assert "--strict-mcp-config" not in argv
 
-    # An INHERIT cwd inside a git repo does not raise (unlike CLEAN).
-    assert Path(plan.cwd).exists()
+    # An INHERIT cwd inside a git repo does not raise (unlike CLEAN) — and
+    # it is the *given* cwd, not a substituted scratch directory (test-critic
+    # round 1, tautology::F8: `Path(plan.cwd).exists()` alone would also
+    # pass for a provider that ignored spec.cwd and returned some other
+    # existing directory it made up).
+    repo = tmp_path / "repo"
+    assert Path(plan.cwd) == repo
+
+    # test-critic round 1, tautology::F1: every other assertion in this test
+    # uses the same fixed literals ("sonnet"/"acceptEdits") a provider could
+    # hard-code without ever reading spec.model/spec.permission_mode. A
+    # second spec with *different* values, asserted the same way, kills that
+    # implementation.
+    other_plan = _inherit_plan(tmp_path, model="opus", permission_mode="plan")
+    other_argv = other_plan.argv
+    assert other_argv[other_argv.index("--model") + 1] == "opus"
+    assert other_argv[other_argv.index("--permission-mode") + 1] == "plan"
 
 
 # -- dispatch_mode branches (a)/(b), deterministic via injected accepted_keys --
@@ -105,8 +120,16 @@ def test_payload_mode_emits_agents_json_and_agent_flag_no_add_dir(tmp_path):
     assert mode == "payload"
 
     provider = ClaudeCliProvider()
+    # test-critic round 1, tautology::F2: the injected accepted_keys must
+    # reach build_launch_plan too, not just dispatch_mode in isolation —
+    # otherwise the argv assertions below are not actually tied to the
+    # dispatch rule (they would pass for a provider that branches on some
+    # other spec difference between the two dispatch tests instead).
     plan = provider.build_launch_plan(
-        spec, session_id=str(uuid.uuid4()), run_dir=tmp_path / "run"
+        spec,
+        session_id=str(uuid.uuid4()),
+        run_dir=tmp_path / "run",
+        accepted_keys=accepted_keys,
     )
     assert "--add-dir" not in plan.argv
     assert "--agents" in plan.argv
@@ -145,7 +168,14 @@ def test_materialized_mode_when_definition_sets_a_rejected_key(tmp_path):
 
     run_dir = tmp_path / "run"
     provider = ClaudeCliProvider()
-    plan = provider.build_launch_plan(spec, session_id=str(uuid.uuid4()), run_dir=run_dir)
+    # Same accepted_keys threaded through as the payload test above
+    # (tautology::F2) — this spec sets `skills`, which the *production*
+    # AGENT_JSON_KEYS default now accepts (verified against the real CLI,
+    # see change report), so without this the default dispatch would
+    # choose "payload" here too and every assertion below would fail.
+    plan = provider.build_launch_plan(
+        spec, session_id=str(uuid.uuid4()), run_dir=run_dir, accepted_keys=accepted_keys
+    )
 
     assert "--agents" not in plan.argv
     assert "--add-dir" in plan.argv
@@ -228,11 +258,67 @@ def test_effort_falls_back_to_host_context_effort():
     assert spec.effort == "high"
 
 
+def test_effort_set_on_definition_wins_over_context():
+    # test-critic round 1, tautology::F6: the fallback test above only
+    # exercises "definition unset -> context wins"; without this reverse
+    # case, an implementation that assigns `effort = host_context.effort`
+    # unconditionally (never reading `definition.effort` at all) would
+    # satisfy the fallback test too.
+    from lib_python_harness.resolve import resolve
+
+    spec = resolve(
+        _definition(model="sonnet", effort="low"), _host_context(effort="high")
+    )
+    assert spec.effort == "low"
+
+
 def test_model_inherit_passes_through_literally():
     from lib_python_harness.resolve import resolve
 
     spec = resolve(_definition(model="inherit"), _host_context())
     assert spec.model == "inherit"
+
+
+def test_model_falls_back_to_host_context_model_when_definition_unset():
+    # test-critic round 1, tautology::F6 ("the same one-sidedness applies to
+    # model, whose only assertion is test_model_inherit_passes_through_
+    # literally") — that test never leaves definition.model unset, so it
+    # cannot tell "definition else context" apart from "definition always".
+    from lib_python_harness.resolve import resolve
+
+    spec = resolve(_definition(), _host_context(model="haiku"))
+    assert spec.model == "haiku"
+
+
+def test_hooks_and_mcp_servers_arrive_on_the_spec_at_project_scope():
+    # test-critic round 1, tautology::F3: every existing hooks/mcp_servers
+    # assertion is the *negative* one at plugin scope
+    # (test_plugin_scope_drops_permission_mode_hooks_and_mcp_servers) — an
+    # implementation that never copies either field from the definition at
+    # all (leaving both permanently None) would satisfy that test too. This
+    # is the missing positive case: project scope must actually carry them.
+    from lib_python_harness.resolve import resolve
+
+    spec = resolve(
+        _definition(
+            model="sonnet",
+            hooks={"PreToolUse": {"matcher": "Read"}},
+            mcp_servers={"demo": {"command": "demo-server"}},
+        ),
+        _host_context(),
+    )
+    assert spec.hooks == {"PreToolUse": {"matcher": "Read"}}
+    assert spec.mcp_servers == {"demo": {"command": "demo-server"}}
+
+
+def test_mcp_servers_falls_back_to_host_context_when_definition_unset():
+    from lib_python_harness.resolve import resolve
+
+    spec = resolve(
+        _definition(model="sonnet"),
+        _host_context(mcp_servers={"parent": {"command": "parent-server"}}),
+    )
+    assert spec.mcp_servers == {"parent": {"command": "parent-server"}}
 
 
 def test_tools_and_disallowed_tools_never_become_top_level_argv_flags(tmp_path):
@@ -246,10 +332,22 @@ def test_no_system_prompt_flag_for_inherit(tmp_path):
     assert "--system-prompt" not in plan.argv
 
 
-def test_omit_claude_md_emits_exact_settings_literal(tmp_path):
+def test_omit_claude_md_drops_project_from_setting_sources(tmp_path):
+    # Live-verified (round 2) against installed claude v2.1.277: CLAUDE.md
+    # loading is gated by the "project" entry of --setting-sources, not by
+    # any --settings instructionFiles key (which was probed and found to
+    # have no observable effect at all). omit_claude_md=True must drop
+    # "project" and keep "user,local"; no --settings flag is emitted.
     plan = _inherit_plan(tmp_path, omit_claude_md=True)
-    assert "--settings" in plan.argv
-    assert plan.argv[plan.argv.index("--settings") + 1] == '{"instructionFiles": []}'
+    assert "--setting-sources" in plan.argv
+    assert plan.argv[plan.argv.index("--setting-sources") + 1] == "user,local"
+    assert "--settings" not in plan.argv
+
+    unset_plan = _inherit_plan(tmp_path)
+    assert (
+        unset_plan.argv[unset_plan.argv.index("--setting-sources") + 1]
+        == "user,project,local"
+    )
 
 
 def test_mcp_config_only_when_non_empty(tmp_path):
@@ -281,3 +379,25 @@ def test_clean_argv_is_byte_identical_to_today(tmp_path):
                  "--disable-slash-commands", "--tools", "--output-format",
                  "--verbose", "--system-prompt"):
         assert flag in plan.argv
+
+    # test-critic round 1, tautology::F9: membership alone (`flag in argv`)
+    # never pins order/values/completeness — a reordered or re-valued
+    # ISOLATION_ARGV[CLEAN] would still pass every check above. This is an
+    # independently written literal (the same pattern
+    # tests/test_claude_cli_flags.py's own header comment documents) of the
+    # exact contiguous isolation-flag subsequence CLEAN emits, checked as an
+    # ordered run of tokens, not a bag of membership checks.
+    expected_isolation_tokens = [
+        "--setting-sources", "",
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+        "--tools", "",
+        "--output-format", "stream-json",
+        "--verbose",
+    ]
+    n = len(expected_isolation_tokens)
+    windows = [plan.argv[i : i + n] for i in range(len(plan.argv) - n + 1)]
+    assert expected_isolation_tokens in windows, (
+        f"expected contiguous subsequence {expected_isolation_tokens} not "
+        f"found, in order, in argv {plan.argv}"
+    )

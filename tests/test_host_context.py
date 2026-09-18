@@ -127,6 +127,16 @@ def test_complete_never_populates_mcp_servers(tmp_path, monkeypatch):
     _plant_transcript(config_dir)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
 
+    # test-critic round 1, tautology::F4: without a real .mcp.json for an
+    # implementation to (wrongly) read from, "complete() never populates
+    # mcp_servers" is indistinguishable from "complete() merges whatever
+    # .mcp.json has, and there just isn't one here" — both pass the
+    # assertions below. Planting a real .mcp.json with content an
+    # over-eager complete() could pick up closes that gap.
+    (project_dir / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"leaked": {"command": "should-not-be-read"}}})
+    )
+
     supplied = {"demo": {"command": "demo-server"}}
     context = HostContext(cwd=project_dir, session_id=SESSION_ID, mcp_servers=supplied)
     context.complete()

@@ -38,5 +38,16 @@ class UnsafeCwdError(HarnessError):
 
     Raised by `ClaudeCliProvider.build_launch_plan()` when the caller-supplied
     `cwd` does not exist, sits inside a git repository (or under one), or is
-    non-empty without `allow_nonempty_cwd=True`.
+    non-empty without `allow_nonempty_cwd=True`. Also raised (with a
+    different message) when `Isolation.INHERIT`'s own, much smaller, cwd
+    recipe fails: `cwd` missing entirely, or not an existing directory.
+    """
+
+
+class FrontmatterError(HarnessError):
+    """`agents.frontmatter.parse_frontmatter` could not make sense of a
+    `.md` file's `---`-fenced header — e.g. an opening fence with no closing
+    fence. Never raised for a file that merely lacks recognised fields or
+    has an empty header; that case loads with `FALLBACK_DESCRIPTION`
+    instead (`agents.frontmatter.load_agent_definition`).
     """
