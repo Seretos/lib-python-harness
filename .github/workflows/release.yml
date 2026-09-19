@@ -155,6 +155,7 @@ jobs:
           # the loop then runs zero times and the step is a green no-op. Add a
           # line here when a downstream repo starts depending on this lib.
           CONSUMERS: |
+            Seretos/agent-harness
           TITLE: "chore(deps): bump lib-python-harness to v${{ inputs.version }}"
           BODY: |
             ## Dependency update
