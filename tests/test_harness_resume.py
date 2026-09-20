@@ -343,3 +343,211 @@ def test_resume_with_provider_lacking_build_resume_plan_is_unsupported(spawn_cal
         Harness(store=store, provider=_NoResumeProvider()).resume("run-1", "hi")
 
     assert spawn_calls == []
+
+
+# -- #21 start_resume -------------------------------------------------------
+#
+# `start_resume()` is the non-blocking half of `resume()`: it returns as soon
+# as the follow-up child is spawned (state RUNNING); the caller then uses
+# poll / wait_for / stop.
+
+
+def test_start_resume_returns_running_before_child_exits(tmp_path):
+    harness = _fake_harness(extra=("--sleep", "0.5"))
+    origin, _ = _origin_run(tmp_path, harness)
+    assert origin.state == RunState.COMPLETED
+
+    t0 = time.monotonic()
+    started = harness.start_resume(origin.run_id, "follow-up prompt")
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 0.3, f"start_resume blocked for {elapsed:.2f}s (child sleeps 0.5s)"
+    assert isinstance(started, RunResult)
+    assert started.run_id != origin.run_id
+    assert started.session_id == origin.session_id
+    assert started.state == RunState.RUNNING
+    assert harness.store.get(started.run_id)["resumed_from"] == origin.run_id
+    assert harness.poll(started.run_id).state == RunState.RUNNING
+
+    final = harness.wait_for(started.run_id, timeout=30)
+    assert final.state == RunState.COMPLETED
+    assert final.text == "OK"
+    assert final.is_error is False
+    assert final.run_id == started.run_id
+
+
+def test_start_resume_of_a_resumed_run_has_exactly_one_resume_pair(tmp_path):
+    harness = _fake_harness()
+    origin, _ = _origin_run(tmp_path, harness)
+    first = harness.start_resume(origin.run_id, "first follow-up")
+    assert harness.wait_for(first.run_id, timeout=30).state == RunState.COMPLETED
+
+    second = harness.start_resume(first.run_id, "second follow-up")
+    assert harness.wait_for(second.run_id, timeout=30).state == RunState.COMPLETED
+
+    flags = _provenance(harness, second.run_id)["flags"]
+    assert flags.count("--resume") == 1
+    assert _has_adjacent(flags, ["--resume", origin.session_id])
+    assert "--session-id" not in flags
+
+
+def test_start_resume_accepts_cancelled_origin(tmp_path):
+    harness = _fake_harness()
+    origin, _ = _origin_run(tmp_path, harness)
+    record = harness.store.get(origin.run_id)
+    record["state"] = RunState.CANCELLED
+    harness.store.put(origin.run_id, record)
+
+    started = harness.start_resume(origin.run_id, "again")
+
+    assert started.session_id == origin.session_id
+    assert harness.wait_for(started.run_id, timeout=30).state == RunState.COMPLETED
+
+
+def test_stop_on_started_resume_leaves_origin_untouched(tmp_path):
+    harness = _fake_harness(extra=("--sleep", "5"))
+    origin, _ = _origin_run(tmp_path, harness)
+    origin_run_dir = harness.store.get(origin.run_id)["run_dir"]
+
+    started = harness.start_resume(origin.run_id, "follow-up")
+    assert started.state == RunState.RUNNING
+    stopped = harness.stop(started.run_id)
+
+    assert stopped.state == RunState.CANCELLED
+    assert harness.store.get(started.run_id)["state"] == RunState.CANCELLED
+    origin_record = harness.store.get(origin.run_id)
+    assert origin_record["state"] == RunState.COMPLETED
+    assert origin_record["run_dir"] == origin_run_dir
+    assert origin_record.get("resumed_from") is None
+    assert _provenance(harness, origin.run_id).get("resumed_from") is None
+
+
+def test_second_start_resume_while_first_is_live_is_rejected(tmp_path):
+    harness = _fake_harness(extra=("--sleep", "5"))
+    origin, _ = _origin_run(tmp_path, harness)
+    first = harness.start_resume(origin.run_id, "one")
+    try:
+        with pytest.raises(HarnessError, match=first.run_id):
+            harness.start_resume(origin.run_id, "two")
+    finally:
+        harness.stop(first.run_id)
+
+
+def test_start_resume_argv_repeats_isolation_flags(tmp_path):
+    harness = _fake_harness(extra=("--sleep", "0.3"))
+    origin, run_cwd = _origin_run(tmp_path, harness)
+    new_prompt = "follow-up prompt"
+
+    started = harness.start_resume(origin.run_id, new_prompt)
+    try:
+        argv = harness.store.get(started.run_id)["argv"]
+        assert _has_adjacent(argv, ["--resume", origin.session_id])
+        assert "--session-id" not in argv
+        for pair in CLEAN_FLAG_PAIRS:
+            assert _has_adjacent(argv, pair), f"{pair} missing from start_resume argv"
+        for single in CLEAN_FLAG_SINGLES:
+            assert single in argv, f"{single} missing from start_resume argv"
+        assert _has_adjacent(argv, ["--model", "haiku"])
+    finally:
+        final = harness.wait_for(started.run_id, timeout=30)
+
+    assert final.state == RunState.COMPLETED
+    prov = _provenance(harness, started.run_id)
+    flags = prov["flags"]
+    assert _has_adjacent(flags, ["--resume", origin.session_id])
+    assert "--session-id" not in flags
+    assert prov["prompt_sha256"] == hashlib.sha256(new_prompt.encode()).hexdigest()
+    assert prov["resumed_from"] == origin.run_id
+    assert Path(prov["cwd"]) == run_cwd
+
+
+def test_start_resume_after_origin_cwd_deleted_uses_fresh_cwd(tmp_path):
+    harness = _fake_harness()
+    origin, run_cwd = _origin_run(tmp_path, harness)
+    shutil.rmtree(run_cwd)
+
+    started = harness.start_resume(origin.run_id, "again")
+    assert harness.wait_for(started.run_id, timeout=30).state == RunState.COMPLETED
+
+    prov = _provenance(harness, started.run_id)
+    assert Path(prov["cwd"]) != run_cwd
+    assert Path(prov["cwd"]).is_dir()
+
+
+def _error_case_created(store):
+    _seed(store, "created-run", RunState.CREATED, session_id="s-created")
+    return "created-run", HarnessError, "CREATED"
+
+
+def _error_case_running(store):
+    _seed(store, "running-run", RunState.RUNNING, session_id="s-running")
+    return "running-run", HarnessError, "RUNNING"
+
+
+def _error_case_unknown(store):
+    return "no-such-run", HarnessError, "no-such-run"
+
+
+def _error_case_live_sibling(store):
+    _seed(store, "done-run", RunState.COMPLETED, session_id="s-shared")
+    _seed(store, "live-sibling", RunState.RUNNING, session_id="s-shared")
+    return "done-run", HarnessError, "live-sibling"
+
+
+def _error_case_codex(store):
+    _seed(store, "run-1", RunState.COMPLETED, provider="codex")
+    return "run-1", UnsupportedByProvider, "codex"
+
+
+def _error_case_mistral(store):
+    _seed(store, "run-1", RunState.COMPLETED, provider="mistral")
+    return "run-1", UnsupportedByProvider, "mistral"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        _error_case_created,
+        _error_case_running,
+        _error_case_unknown,
+        _error_case_live_sibling,
+        _error_case_codex,
+        _error_case_mistral,
+    ],
+    ids=lambda f: f.__name__.removeprefix("_error_case_"),
+)
+def test_start_resume_error_paths_match_resume(spawn_calls, case):
+    store = InMemoryRunStore()
+    run_id, exc_type, match = case(store)
+    harness = Harness(store=store)
+
+    with pytest.raises(exc_type, match=match) as start_exc:
+        harness.start_resume(run_id, "hi")
+    with pytest.raises(exc_type, match=match) as resume_exc:
+        harness.resume(run_id, "hi")
+
+    assert type(start_exc.value) is type(resume_exc.value)
+    assert spawn_calls == [], "a guard must raise before anything is spawned"
+
+
+def test_start_resume_with_provider_lacking_build_resume_plan_is_unsupported(spawn_calls):
+    store = InMemoryRunStore()
+    _seed(store, "run-1", RunState.COMPLETED, provider="claude")
+
+    with pytest.raises(UnsupportedByProvider, match="build_resume_plan"):
+        Harness(store=store, provider=_NoResumeProvider()).start_resume("run-1", "hi")
+
+    assert spawn_calls == []
+
+
+def test_start_resume_accepts_empty_prompt_like_resume(tmp_path):
+    """No empty-prompt validation exists on resume(); start_resume matches it."""
+    harness = _fake_harness()
+    origin, _ = _origin_run(tmp_path, harness)
+
+    resumed = harness.resume(origin.run_id, "")
+    started = harness.start_resume(origin.run_id, "")
+
+    assert resumed.state == RunState.COMPLETED
+    assert started.state == RunState.RUNNING
+    assert harness.wait_for(started.run_id, timeout=30).state == RunState.COMPLETED
