@@ -295,3 +295,4 @@ def test_version_falls_back_when_distribution_is_absent(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(lib_python_harness)
+    assert lib_python_harness.__version__ == importlib.metadata.version("lib-python-harness")
