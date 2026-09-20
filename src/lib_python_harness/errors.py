@@ -58,3 +58,11 @@ class ConfigError(HarnessError):
     value cannot be applied (undefined profile, unknown MCP server name, ...).
     The message names the file (or agent) and the offending key/value.
     """
+
+
+class UnsupportedByProvider(HarnessError):
+    """A `RunSpec` field is set that the selected provider cannot honour.
+
+    Raised by a provider's `build_launch_plan()` before anything is spawned;
+    the message names every offending field.
+    """

@@ -2,15 +2,15 @@
 
 Ported behaviour from lib_python_worktree's core/process_lifecycle.py
 (``_spawn_detached``, ``_send_graceful_signal``, ``_force_kill``,
-``_reap_until_gone``, ``_wait_or_kill``, ``_capture_start_time``), POSIX-only
-per the plan (no Windows Job Object / handle-scan machinery — see plan
-Mechanism balance / Removed). Unlike that reference, stdin carries the run's
+``_reap_until_gone``, ``_wait_or_kill``, ``_capture_start_time``), POSIX tests
+plus native-Windows tests (R6: PATHEXT shim spawn, whole-tree kill). Unlike that reference, stdin carries the run's
 prompt text (piped, not DEVNULL) and stdout/stderr are split into two
 separate files (events JSONL vs. stderr.txt) rather than one combined log.
 """
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import time
 
@@ -24,17 +24,18 @@ from lib_python_harness.runtime.process import (
     _wait_or_kill,
     _capture_start_time,
     _pid_status,
+    _raw_alive,
 )
 
-# POSIX-only per the plan (no Windows Job Object / handle-scan machinery —
-# see module docstring above and plan Mechanism balance / Removed).
-# `_capture_start_time` returns `None` on windows-latest (no `psutil` in the
-# `test` extra, no `/proc`), so `assert start_time is not None` below would
-# fail there, and `_force_kill`/`_reap_until_gone` use `signal.SIGKILL`/
-# `os.WNOHANG`, neither of which exists on Windows.
-pytestmark = pytest.mark.skipif(
+# Per-test platform marks (was a module-wide POSIX skip). The POSIX tests
+# below are unchanged; they use `signal.SIGTERM`-ignoring children and
+# `_capture_start_time` (no `psutil` in the `test` extra on windows-latest).
+POSIX_ONLY = pytest.mark.skipif(
     os.name != "posix",
-    reason="process control (_spawn_detached signal handling, SIGKILL, os.WNOHANG) is POSIX-only",
+    reason="POSIX signal semantics (SIGTERM-ignoring child, start-time via /proc)",
+)
+WINDOWS_ONLY = pytest.mark.skipif(
+    os.name != "nt", reason="native Windows process control (PATHEXT shims, taskkill)"
 )
 
 
@@ -49,6 +50,7 @@ def _spawn(tmp_path, code):
     )
 
 
+@POSIX_ONLY
 def test_graceful_exit_on_sigterm(tmp_path):
     proc = _spawn(tmp_path, "import time; time.sleep(30)")
     start_time = _capture_start_time(proc.pid)
@@ -63,6 +65,7 @@ def test_graceful_exit_on_sigterm(tmp_path):
     assert _pid_status(proc.pid, start_time) is False
 
 
+@POSIX_ONLY
 def test_sigterm_ignoring_child_escalates_to_kill(tmp_path):
     code = (
         "import signal, time\n"
@@ -80,6 +83,7 @@ def test_sigterm_ignoring_child_escalates_to_kill(tmp_path):
     assert _pid_status(proc.pid, start_time) is False
 
 
+@POSIX_ONLY
 def test_timeout_zero_forces_immediate_kill(tmp_path):
     proc = _spawn(tmp_path, "import time; time.sleep(30)")
     start_time = _capture_start_time(proc.pid)
@@ -92,6 +96,7 @@ def test_timeout_zero_forces_immediate_kill(tmp_path):
     assert _pid_status(proc.pid, start_time) is False
 
 
+@POSIX_ONLY
 def test_pid_status_reports_mismatched_identity_as_not_alive(tmp_path):
     proc = _spawn(tmp_path, "import time; time.sleep(30)")
     real_start_time = _capture_start_time(proc.pid)
@@ -104,3 +109,116 @@ def test_pid_status_reports_mismatched_identity_as_not_alive(tmp_path):
 
     _force_kill(proc.pid)
     _reap_until_gone(proc.pid)
+
+
+# -- native Windows (R6) -----------------------------------------------------
+
+
+def _tasklist_alive(pid: int) -> bool:
+    out = subprocess.run(
+        ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+        capture_output=True, text=True,
+    ).stdout
+    return f'"{pid}"' in out
+
+
+def _taskkill_tree(pid: int) -> None:  # test-owned cleanup, independent of the code under test
+    subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
+
+
+def _wait_for(path, timeout=15.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists() and path.read_text().strip():
+            return int(path.read_text().strip())
+        time.sleep(0.1)
+    raise AssertionError(f"{path} never appeared")
+
+
+@pytest.fixture
+def cmd_shim(tmp_path, monkeypatch):
+    """A `probe.cmd` reachable only through PATHEXT, whose grandchild python
+    records its pid and sleeps -- the shape of the npm `codex.cmd` shim."""
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    pidfile = tmp_path / "grandchild.pid"
+    script = shim_dir / "grandchild.py"
+    script.write_text(
+        "import os, sys, time\n"
+        "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
+        "time.sleep(60)\n"
+    )
+    (shim_dir / "probe.cmd").write_text(
+        "@echo off\r\n"
+        f'"{sys.executable}" "{script}" "{pidfile}"\r\n',
+        newline="",
+    )
+    monkeypatch.setenv("PATH", str(shim_dir) + os.pathsep + os.environ["PATH"])
+    return pidfile
+
+
+@WINDOWS_ONLY
+def test_pathext_shim_can_be_spawned(tmp_path, cmd_shim):
+    proc = _spawn_detached(
+        argv=["probe"], cwd=str(tmp_path), env=None, stdin_text="",
+        events_path=tmp_path / "events.jsonl", stderr_path=tmp_path / "stderr.txt",
+    )
+    try:
+        grandchild = _wait_for(cmd_shim)
+        assert proc.poll() is None
+        assert _tasklist_alive(grandchild)
+    finally:
+        _taskkill_tree(proc.pid)
+
+
+@WINDOWS_ONLY
+def test_wait_or_kill_removes_shim_and_its_grandchild(tmp_path, cmd_shim):
+    proc = _spawn_detached(
+        argv=["probe"], cwd=str(tmp_path), env=None, stdin_text="",
+        events_path=tmp_path / "events.jsonl", stderr_path=tmp_path / "stderr.txt",
+    )
+    try:
+        grandchild = _wait_for(cmd_shim)
+        start_time = _capture_start_time(proc.pid)
+
+        _wait_or_kill(proc.pid, timeout=1.0, expected_start_time=start_time)
+
+        assert not _tasklist_alive(proc.pid)
+        assert not _tasklist_alive(grandchild)
+    finally:
+        _taskkill_tree(proc.pid)
+
+
+@WINDOWS_ONLY
+def test_raw_alive_reports_true_without_killing_the_process(tmp_path):
+    # On Windows os.kill(pid, 0) is not a liveness probe: it can terminate.
+    proc = _spawn(tmp_path, "import time; time.sleep(30)")
+    try:
+        assert _raw_alive(proc.pid) is True
+        time.sleep(0.3)
+        assert proc.poll() is None, "_raw_alive killed the process it probed"
+        assert _tasklist_alive(proc.pid)
+    finally:
+        _taskkill_tree(proc.pid)
+
+
+@WINDOWS_ONLY
+def test_raw_alive_reports_false_for_a_finished_process(tmp_path):
+    proc = _spawn(tmp_path, "pass")
+    proc.wait(timeout=10)
+    assert _raw_alive(proc.pid) is False
+
+
+@WINDOWS_ONLY
+def test_pid_status_is_none_not_a_false_verdict_without_psutil(tmp_path):
+    try:
+        import psutil  # noqa: F401
+        pytest.skip("psutil installed: start time is verifiable, tri-state None not reachable")
+    except ImportError:
+        pass
+    proc = _spawn(tmp_path, "import time; time.sleep(30)")
+    try:
+        assert _capture_start_time(proc.pid) is None
+        assert _pid_status(proc.pid, time.time()) is None
+    finally:
+        _taskkill_tree(proc.pid)

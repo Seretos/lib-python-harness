@@ -29,7 +29,8 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-ra --strict-markers -m \"not requires_claude\""
+addopts = "-ra --strict-markers -m \"not requires_claude and not requires_codex\""
 markers = [
   "requires_claude: needs a real installed `claude` CLI plus subscription auth; excluded by default, run explicitly with `-m requires_claude`.",
+  "requires_codex: needs a real installed `codex` CLI plus ChatGPT/API auth; excluded by default, run explicitly with `-m requires_codex`.",
 ]

@@ -73,6 +73,7 @@ class RunSpec:
     prompt: str
     isolation: Isolation
     model: str
+    provider: str = "claude"
     effort: str | None = None
     system_prompt: str | None = None
     json_schema: dict[str, Any] | None = None
