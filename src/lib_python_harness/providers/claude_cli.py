@@ -455,8 +455,9 @@ class ClaudeCliProvider:
 
         `provider_argv` is the origin's recorded argv without the binary. It
         is copied verbatim — derived, never rebuilt, so every isolation flag
-        the origin ran with survives — except that the `--session-id <id>`
-        pair is dropped and `--resume <session_id>` appended. The run starts
+        the origin ran with survives — except that any `--session-id <id>` or
+        `--resume <id>` pair (the latter when the origin was itself a resume)
+        is dropped and `--resume <session_id>` appended. The run starts
         in the origin's `cwd`; if that directory no longer exists a fresh
         temp directory is used (measured live: `claude --resume` finds the
         session from a foreign cwd). `_resolve_and_validate_cwd` is never
@@ -469,7 +470,7 @@ class ClaudeCliProvider:
             if skip:
                 skip = False
                 continue
-            if token == "--session-id":
+            if token in ("--session-id", "--resume"):
                 skip = True
                 continue
             argv.append(token)

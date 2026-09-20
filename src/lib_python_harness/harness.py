@@ -220,8 +220,6 @@ class Harness:
         else:
             self.store.put(run_id, record)
 
-        self.store.put(run_id, record)
-
         binary_argv = list(self.claude_argv or provider.binary_argv)
         argv = binary_argv + plan.argv
         record["binary_argv"] = binary_argv

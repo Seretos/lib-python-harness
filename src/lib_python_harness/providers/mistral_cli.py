@@ -112,8 +112,8 @@ class MistralCliProvider:
         self, *, provider_argv: list[str], session_id: str, cwd: str | None, prompt: str
     ) -> LaunchPlan:
         raise UnsupportedByProvider(
-            "the mistral provider has no isolated resume the harness can replay "
-            "(the vibe CLI has no isolated resume the harness can replay)"
+            "the mistral provider does not support resume: the vibe CLI offers "
+            "no isolated resume whose flags the harness can replay"
         )
 
     def parse_events(self, lines: Iterable[str]) -> RunResult:

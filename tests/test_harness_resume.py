@@ -142,6 +142,25 @@ def test_resume_argv_repeats_isolation_flags_and_swaps_session_flag(tmp_path):
     assert Path(prov["cwd"]) == run_cwd
 
 
+def test_resume_of_a_resumed_run_has_exactly_one_resume_pair(tmp_path):
+    harness = _fake_harness()
+    origin, _ = _origin_run(tmp_path, harness)
+    first = harness.resume(origin.run_id, "first follow-up")
+    assert first.state == RunState.COMPLETED
+
+    second = harness.resume(first.run_id, "second follow-up")
+    assert second.state == RunState.COMPLETED
+
+    flags = _provenance(harness, second.run_id)["flags"]
+    assert flags.count("--resume") == 1
+    assert _has_adjacent(flags, ["--resume", origin.session_id])
+    assert "--session-id" not in flags
+    for pair in CLEAN_FLAG_PAIRS:
+        assert _has_adjacent(flags, pair), f"{pair} missing from resume-of-resume flags"
+    for single in CLEAN_FLAG_SINGLES:
+        assert single in flags, f"{single} missing from resume-of-resume flags"
+
+
 def test_resume_after_origin_cwd_deleted_uses_fresh_cwd(tmp_path):
     harness = _fake_harness()
     origin, run_cwd = _origin_run(tmp_path, harness)
