@@ -295,7 +295,11 @@ class Harness:
         self, run_id: str, prompt: str, *, timeout: float | None = None
     ) -> RunResult:
         """Send a follow-up `prompt` to the finished run `run_id`, blocking
-        until the new run ends (`start` + `wait`, one code path).
+        until the new run ends: exactly `start_resume()` followed by `wait()`
+        on the new run (one code path). Use `start_resume()` to not block.
+
+        `timeout` has `wait()` semantics (an expired timeout cancels the new
+        run).
 
         A resume is a NEW run: new `run_id`, the origin's `session_id`, and
         `resumed_from` = the origin's `run_id`; the origin record is left
@@ -310,6 +314,22 @@ class Harness:
         the CLI actually wrote exists, so the answer may rest on a partial
         turn. Same-session exclusion holds across every `Harness` in this
         process; it is NOT enforced across processes.
+        """
+        started = self.start_resume(run_id, prompt)
+        return self.wait(started.run_id, timeout=timeout)
+
+    def start_resume(self, run_id: str, prompt: str) -> RunResult:
+        """Non-blocking `resume()`: send a follow-up `prompt` to the finished
+        run `run_id` and return as soon as the follow-up child is spawned.
+
+        The returned `RunResult` is the NEW run: new `run_id`, the origin's
+        `session_id`, `state == RUNNING` and `resumed_from` = the origin's
+        `run_id` (in the record). Unlike `resume()` it does not wait for the
+        run to end; afterwards use `poll` / `wait_for` / `stop` on the new
+        `run_id` (`wait` works too on the same `Harness` instance). The
+        origin record is left untouched. Validation, errors, isolation-flag
+        replay, cwd handling and same-session exclusion are exactly those of
+        `resume()`.
         """
         origin = self._require_record(run_id)
         state = origin["state"]
@@ -359,7 +379,7 @@ class Harness:
             },
             exclusive_session=True,
         )
-        return self.wait(started.run_id, timeout=timeout)
+        return started
 
     def _resolve_recorded_provider(self, record: dict[str, Any]) -> Provider:
         name = record.get("provider") or "claude"
