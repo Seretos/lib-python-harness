@@ -10,7 +10,10 @@ requires-python = ">=3.11"
 authors = [{ name = "Arne von Appen" }]
 # Runtime deps go here. Keep the surface small — this is a leaf dependency
 # consumed by other projects. Empty by default.
-dependencies = []
+dependencies = [
+  "lib-python-config @ git+https://github.com/Seretos/lib-python-config@release/0.x",
+  "pydantic>=2.0",
+]
 
 [project.optional-dependencies]
 test = [

@@ -98,6 +98,11 @@ class RunSpec:
     agent_name: str | None = None
     description: str | None = None
 
+    # -- config-driven (ticket #3); carriers only, skeleton.
+    setting_sources: list[str] | None = None
+    strict_mcp: bool | None = None
+    memory: bool | None = None
+
 
 @dataclass(frozen=True)
 class LaunchPlan:
