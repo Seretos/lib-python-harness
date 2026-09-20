@@ -239,3 +239,59 @@ def test_seam_names_resolve_to_the_real_implementations():
     assert lib_python_harness.RunStore is RunStore
     assert lib_python_harness.InMemoryRunStore is InMemoryRunStore
     assert lib_python_harness.FileRunStore is FileRunStore
+
+
+# --- __version__ is derived from the installed distribution (ticket #9) ---
+
+_SRC = Path(__file__).resolve().parent.parent / "src"
+_ACCEPTANCE = (
+    "import importlib.metadata as m, lib_python_harness as l; "
+    "print(m.version('lib-python-harness'), l.__version__)"
+)
+
+
+def test_version_tracks_installed_distribution_metadata(tmp_path):
+    """Driving test: a distribution declaring 9.9.9 must be what __version__ reports."""
+    import os
+    import subprocess
+    import sys
+
+    dist_info = tmp_path / "lib_python_harness-9.9.9.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: lib-python-harness\nVersion: 9.9.9\n",
+        encoding="utf-8",
+    )
+    parts = [str(tmp_path), str(_SRC)]
+    inherited = os.environ.get("PYTHONPATH")
+    if inherited:
+        parts.append(inherited)
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(parts)}
+    proc = subprocess.run(
+        [sys.executable, "-c", _ACCEPTANCE],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.split() == ["9.9.9", "9.9.9"]
+
+
+def test_version_matches_metadata_in_this_environment():
+    import importlib.metadata
+
+    assert importlib.metadata.version("lib-python-harness") == lib_python_harness.__version__
+
+
+def test_version_falls_back_when_distribution_is_absent(monkeypatch):
+    import importlib
+    import importlib.metadata
+
+    def raiser(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", raiser)
+    try:
+        importlib.reload(lib_python_harness)
+        assert lib_python_harness.__version__ == "0.0.0+unknown"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(lib_python_harness)
