@@ -10,7 +10,9 @@ from __future__ import annotations
 from .agents.model import AgentDefinition
 from .agents.sources import ClaudeMarkdownSource, DefinitionSource
 from .agents.discovery import discover
+from .config import HarnessConfig, load_harness_config
 from .errors import (
+    ConfigError,
     FrontmatterError,
     HarnessError,
     IllegalTransitionError,
@@ -31,10 +33,12 @@ __all__ = [
     "AgentDefinition",
     "ClaudeCliProvider",
     "ClaudeMarkdownSource",
+    "ConfigError",
     "DefinitionSource",
     "FileRunStore",
     "FrontmatterError",
     "Harness",
+    "HarnessConfig",
     "HarnessError",
     "HostContext",
     "IllegalTransitionError",
@@ -50,6 +54,7 @@ __all__ = [
     "UnsafeCwdError",
     "__version__",
     "discover",
+    "load_harness_config",
     "resolve",
     "run",
 ]

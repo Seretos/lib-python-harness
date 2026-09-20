@@ -29,6 +29,8 @@ class HostContext:
     permission_mode: str | None = None
     effort: str | None = None
     mcp_servers: dict[str, Any] | None = None
+    available_mcp_servers: dict[str, Any] | None = None
+    dispatch_mcp_server_name: str | None = None
     enabled_plugins: dict[str, bool] = field(default_factory=dict)
 
     def complete(self) -> None:

@@ -51,3 +51,10 @@ class FrontmatterError(HarnessError):
     has an empty header; that case loads with `FALLBACK_DESCRIPTION`
     instead (`agents.frontmatter.load_agent_definition`).
     """
+
+
+class ConfigError(HarnessError):
+    """A `.seretos/harness.yml` layer is unreadable or invalid, or a config
+    value cannot be applied (undefined profile, unknown MCP server name, ...).
+    The message names the file (or agent) and the offending key/value.
+    """
