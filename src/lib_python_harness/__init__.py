@@ -25,6 +25,7 @@ from .host.context import HostContext
 from .providers.base import Isolation, LaunchPlan, Provider, RunResult, RunSpec
 from .providers.claude_cli import ClaudeCliProvider
 from .providers.codex_cli import CodexCliProvider
+from .providers.mistral_cli import MistralCliProvider
 from .resolve import resolve
 from .runtime.lifecycle import RunState
 from .runtime.store import FileRunStore, InMemoryRunStore, RunStore
@@ -48,6 +49,7 @@ __all__ = [
     "InMemoryRunStore",
     "Isolation",
     "LaunchPlan",
+    "MistralCliProvider",
     "Provider",
     "RunIdentityUnverifiedError",
     "RunResult",

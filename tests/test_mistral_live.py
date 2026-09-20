@@ -80,6 +80,7 @@ def test_clean_mistral_run_returns_ok():
     record = harness.store.get(started.run_id)
     temp_home = Path(record["cleanup_paths"][0])
     result = harness.wait(started.run_id, timeout=240)
+    record = harness.store.get(started.run_id)  # re-read: provenance is written at finalize
     print(f"session_id={result.session_id}")
 
     assert result.text == "OK"
@@ -90,6 +91,10 @@ def test_clean_mistral_run_returns_ok():
     provenance = json.loads(Path(record["provenance_path"]).read_text())
     assert provenance["provider"] == "mistral"
     assert re.fullmatch(r"\d+\.\d+\.\d+", provenance["cli_version"] or ""), provenance["cli_version"]
+    real_version = subprocess.run(
+        ["vibe", "--version"], capture_output=True, text=True, encoding="utf-8"
+    ).stdout
+    assert provenance["cli_version"] in real_version, (provenance["cli_version"], real_version)
     events = Path(record["events_path"])
     assert events.stat().st_size > 0
     first = json.loads(events.read_text(encoding="utf-8").splitlines()[0])
@@ -123,6 +128,7 @@ def test_stop_cancels_long_mistral_run():
 
     tree = _descendants(pid)
     print(f"pid={pid} descendants={sorted(tree)}")
+    assert tree, "no descendant observed: the descendant half of R5 would be vacuous"
     assert harness._processes[started.run_id].poll() is None, "run ended before stop()"
 
     # Observe survivors BEFORE any cleanup: the safety-net kill below must never

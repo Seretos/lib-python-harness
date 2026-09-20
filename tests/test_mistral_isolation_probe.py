@@ -119,6 +119,9 @@ def test_clean_mistral_run_ignores_home_instructions_skills_mcp_and_cwd_files(
     for k, v in child_env.items():
         if k.startswith("VIBE_"):
             monkeypatch.setenv(k, v)
+    # VIBE_HOME/VIBE_ACTIVE_MODEL are replaced (not dropped) in the child env,
+    # so a third caller-side VIBE_* name is what proves the prefix scrub.
+    monkeypatch.setenv("VIBE_PROBE_EXTRA", "caller-value")
     harness = Harness()
     result = harness.run(
         RunSpec(prompt=stimulus, isolation=Isolation.CLEAN, model=MODEL,
@@ -136,7 +139,7 @@ def test_clean_mistral_run_ignores_home_instructions_skills_mcp_and_cwd_files(
     assert result.is_error is False and result.text
     assert '"sessionId"' in events
     scrubbed = " ".join(str(v) for v in (provenance.get("scrubbed_env") or []))
-    assert "VIBE_HOME" in scrubbed, provenance.get("scrubbed_env")
+    assert "VIBE_PROBE_EXTRA" in scrubbed, provenance.get("scrubbed_env")
 
     for name, needle in (("instruction file", pwned_token), ("skill", skill_token),
                          ("cwd instruction file", cwd_token), ("MCP server", tool_answer),

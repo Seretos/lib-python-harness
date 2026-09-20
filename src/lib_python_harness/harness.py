@@ -37,6 +37,7 @@ from .errors import HarnessError, RunIdentityUnverifiedError
 from .providers.base import Provider, RunResult, RunSpec
 from .providers.claude_cli import ClaudeCliProvider
 from .providers.codex_cli import CodexCliProvider
+from .providers.mistral_cli import MistralCliProvider
 from .runtime.lifecycle import RunState, transition
 from .runtime.process import (
     _capture_start_time,
@@ -59,6 +60,7 @@ _VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
 PROVIDERS: dict[str, type] = {
     "claude": ClaudeCliProvider,
     "codex": CodexCliProvider,
+    "mistral": MistralCliProvider,
 }
 
 
@@ -389,7 +391,7 @@ class Harness:
 
         lines: list[str] = []
         if events_path.exists():
-            lines = [ln for ln in events_path.read_text().splitlines() if ln.strip()]
+            lines = [ln for ln in events_path.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
 
         parse_error: Exception | None = None
         parsed: RunResult | None = None
