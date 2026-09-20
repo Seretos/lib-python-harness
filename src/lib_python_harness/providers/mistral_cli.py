@@ -108,6 +108,14 @@ class MistralCliProvider:
             cleanup_paths=(str(home),),
         )
 
+    def build_resume_plan(
+        self, *, provider_argv: list[str], session_id: str, cwd: str | None, prompt: str
+    ) -> LaunchPlan:
+        raise UnsupportedByProvider(
+            "the mistral provider does not support resume: the vibe CLI offers "
+            "no isolated resume whose flags the harness can replay"
+        )
+
     def parse_events(self, lines: Iterable[str]) -> RunResult:
         session_id: str | None = None
         text: str | None = None

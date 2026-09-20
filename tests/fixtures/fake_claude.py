@@ -39,7 +39,7 @@ def main() -> int:
 
     session_id = "00000000-0000-4000-8000-000000000000"
     for i, token in enumerate(argv):
-        if token == "--session-id" and i + 1 < len(argv):
+        if token in ("--session-id", "--resume") and i + 1 < len(argv):
             session_id = argv[i + 1]
 
     # Emitted first, same as the plain mode below, so a caller that lets a

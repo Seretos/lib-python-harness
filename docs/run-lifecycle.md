@@ -54,15 +54,43 @@ straight to a whole-tree force kill (`taskkill /T /F`).
   -> reap, all identity-checked against the pid's captured start time so a
   recycled pid is never signalled.
 
+## Resume
+
+`Harness.resume(run_id, prompt, timeout=None)` sends a follow-up message to a
+finished run. It is a **new run**, not a transition of the old one: a new
+`run_id`, the origin's `session_id`, and `resumed_from` (record and
+`provenance.json`) naming the origin. The origin's record is untouched and the
+new run walks the ordinary `CREATED -> RUNNING -> terminal` path, so no edge is
+added to the table above.
+
+- **Terminal origins only.** `CREATED`/`RUNNING` origins raise `HarnessError`;
+  a `CANCELLED` origin resumes mechanically, but only the transcript the CLI
+  actually wrote exists, so the answer may rest on a partial turn.
+- **One live run per session.** If any record of the same `session_id` is
+  `CREATED`/`RUNNING`, `resume()` raises `HarnessError`. The check and the new
+  record's insertion are one process-wide critical section, so it holds across
+  every `Harness` instance in a process. It is **not** enforced across
+  processes (a shared `FileRunStore` has no cross-process lock).
+- **Isolation is replayed, not rebuilt.** The provider copies the origin's
+  recorded argv, swaps `--session-id <id>` for `--resume <session_id>`, and
+  sends the new prompt on stdin. Providers whose CLI cannot do this (`codex`,
+  `mistral`, a custom provider without `build_resume_plan`) raise
+  `UnsupportedByProvider`.
+
 ## Resume after `cleanup()`
 
 `cleanup(run_id, remove_cwd=False)` drops the run's record from the store
 and stops tracking its process handle; it never touches the CLI transcript,
-and by default (`remove_cwd=False`) never removes the run's cwd either,
-because whether `claude --resume <session_id>` needs its original cwd is
-unverified rather than known-safe to break. `tests/test_harness_end_to_end.py::test_resume_after_cleanup`
-drives an actual `claude --resume <id> -p "..."` round trip after
-`cleanup()` and prints (does not assert) whether resume also works from an
-unrelated cwd — that measurement is what would eventually justify defaulting
-`remove_cwd=True`, and it has not been made yet, so the default stays
-`False`.
+and by default (`remove_cwd=False`) never removes the run's cwd either (a cwd
+may hold files the caller cares about).
+
+`claude --resume <session_id>` does **not** need the origin's cwd. Measured
+with Claude Code 2.1.278 (Windows, Haiku 4.5, ticket #11): resumed from an
+empty foreign cwd, the session is found, the history is intact (the codeword
+from the origin turn is answered) and the reported `session_id` is the
+origin's; the new turn is written into the origin's transcript. The same
+holds through `Harness.resume` after the origin cwd was deleted (it then runs
+in a fresh temp directory). `tests/test_resume_live.py` prints these
+measurements (`python -m pytest -m requires_claude tests/test_resume_live.py -q -s`),
+and `tests/test_harness_end_to_end.py::test_resume_after_cleanup` drives a raw
+`claude --resume` round trip after `cleanup()`.

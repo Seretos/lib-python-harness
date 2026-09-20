@@ -442,6 +442,46 @@ class ClaudeCliProvider:
 
         return LaunchPlan(argv=argv, cwd=str(cwd), env=env, stdin=spec.prompt)
 
+    def build_resume_plan(
+        self,
+        *,
+        provider_argv: list[str],
+        session_id: str,
+        cwd: str | Path | None,
+        prompt: str,
+    ) -> LaunchPlan:
+        """Plan a follow-up turn on a finished session, replaying the origin
+        run's flags.
+
+        `provider_argv` is the origin's recorded argv without the binary. It
+        is copied verbatim — derived, never rebuilt, so every isolation flag
+        the origin ran with survives — except that any `--session-id <id>` or
+        `--resume <id>` pair (the latter when the origin was itself a resume)
+        is dropped and `--resume <session_id>` appended. The run starts
+        in the origin's `cwd`; if that directory no longer exists a fresh
+        temp directory is used (measured live: `claude --resume` finds the
+        session from a foreign cwd). `_resolve_and_validate_cwd` is never
+        called: the CLEAN "cwd must be empty" check must not re-trip on files
+        `claude` itself wrote there.
+        """
+        argv: list[str] = []
+        skip = False
+        for token in provider_argv:
+            if skip:
+                skip = False
+                continue
+            if token in ("--session-id", "--resume"):
+                skip = True
+                continue
+            argv.append(token)
+        argv += ["--resume", session_id]
+
+        if cwd is not None and Path(cwd).is_dir():
+            run_cwd = str(cwd)
+        else:
+            run_cwd = tempfile.mkdtemp(prefix="lib-python-harness-cwd-")
+        return LaunchPlan(argv=argv, cwd=run_cwd, env=_scrub_env(), stdin=prompt)
+
     def parse_events(self, lines: Iterable[str]) -> RunResult:
         terminal: dict | None = None
         for line in lines:

@@ -62,7 +62,17 @@ The façade. `run(spec)` is `start(spec)` followed by `wait()` — one code
 path, not two independent implementations of "run a prompt". `start`/`poll`
 let a caller drive a long-running prompt without blocking; `stop` cancels a
 run in flight; `cleanup` drops a finished run's bookkeeping record (never
-the CLI transcript, never — by default — the run's cwd).
+the CLI transcript, never — by default — the run's cwd). `resume(run_id,
+prompt)` sends a follow-up to a *finished* run as a **new run** (new `run_id`,
+same `session_id`, `resumed_from` = the origin's `run_id`) with the origin's
+isolation flags replayed from its recorded argv, blocking like `run()`. It
+raises `HarnessError` for an unknown run, a `CREATED`/`RUNNING` origin, or a
+session that already has a live run (exclusion holds across every `Harness` in
+the process, not across processes), and `UnsupportedByProvider` for providers
+that cannot resume (`codex`, `mistral`, a custom provider without
+`build_resume_plan`). The origin's cwd is reused, or a fresh temp directory if
+it is gone (`claude --resume` finds the session from any cwd, measured on
+Claude Code 2.1.278). See `docs/run-lifecycle.md`.
 
 ```python
 from lib_python_harness import Harness, RunSpec, Isolation
@@ -80,6 +90,9 @@ record = harness.start(
 harness.poll(record.run_id)
 harness.stop(record.run_id, timeout=10.0)
 harness.cleanup(record.run_id, remove_cwd=False)
+
+follow_up = harness.resume(result.run_id, "Now reply with exactly DONE")
+print(follow_up.session_id == result.session_id)
 ```
 
 ### RunSpec
@@ -253,7 +266,11 @@ print(lib_python_harness.__version__)
 
 The seam a CLI adapter implements: `build_launch_plan(spec, *, session_id,
 run_dir)` turns a `RunSpec` into a `LaunchPlan`, and `parse_events(lines)`
-turns the adapter's own event stream into a `RunResult`. `ClaudeCliProvider`
+turns the adapter's own event stream into a `RunResult`;
+`build_resume_plan(provider_argv=..., session_id=..., cwd=..., prompt=...)`
+turns a finished run's recorded argv into a follow-up turn on the same session
+(`Harness.resume`; `ClaudeCliProvider` implements it, `CodexCliProvider` and
+`MistralCliProvider` raise `UnsupportedByProvider`). `ClaudeCliProvider`
 `CodexCliProvider` and `MistralCliProvider` are the implementations;
 `RunSpec.provider` selects one by name (`"claude"`, the default, `"codex"` or
 `"mistral"`), and `Harness(provider=...)`
@@ -334,7 +351,8 @@ approval flag (its policy is effectively "never"), so none is emitted. Cost is
 
 The `thread_id` of the stream is reported as `RunResult.session_id`, but a
 CLEAN run is `--ephemeral`: `codex exec resume <thread_id>` fails with "no
-rollout found", so that id is **not resumable**.
+rollout found", so that id is **not resumable** (`Harness.resume` raises
+`UnsupportedByProvider` for a codex run).
 
 ```python
 from pathlib import Path
@@ -401,6 +419,8 @@ tools (built-in, MCP and connector tools) off. `vibe` has no `--model` flag:
 `mistral-medium-3.5`; an unknown alias makes Vibe exit 1, so the run is
 `FAILED`). `--trust` is deliberately omitted: an untrusted workdir makes Vibe
 ignore project config, which is the stronger isolation.
+
+`Harness.resume` is unsupported for Mistral runs (`UnsupportedByProvider`).
 
 Isolation: `VIBE_HOME` relocates config, `AGENTS.md`, skills, agents, plugins,
 hooks, `.env`, MCP servers and session logs, so each run gets a fresh empty
