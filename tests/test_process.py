@@ -209,16 +209,41 @@ def test_raw_alive_reports_false_for_a_finished_process(tmp_path):
     assert _raw_alive(proc.pid) is False
 
 
-@WINDOWS_ONLY
-def test_pid_status_is_none_not_a_false_verdict_without_psutil(tmp_path):
+def test_start_time_and_identity_are_decidable_without_psutil(tmp_path):
+    """Cross-process identity must be decidable on every platform: a real
+    start time, `True` while the child lives, `False` once it exited -- even
+    though this process still holds the child's `Popen`/handle (the shape of
+    an MCP server that started the run while the observer waits elsewhere)."""
+    proc = _spawn(tmp_path, "import time; time.sleep(1.5)")
     try:
-        import psutil  # noqa: F401
-        pytest.skip("psutil installed: start time is verifiable, tri-state None not reachable")
-    except ImportError:
-        pass
-    proc = _spawn(tmp_path, "import time; time.sleep(30)")
-    try:
-        assert _capture_start_time(proc.pid) is None
-        assert _pid_status(proc.pid, time.time()) is None
+        start_time = _capture_start_time(proc.pid)
+        assert start_time is not None
+        assert _pid_status(proc.pid, start_time) is True
+        # identity: a different start time for the same live pid is not us
+        assert _pid_status(proc.pid, start_time - 1000.0) is False
+
+        proc.wait(timeout=30)  # `proc` (and its handle) stay referenced
+        assert _pid_status(proc.pid, start_time) is False
     finally:
-        _taskkill_tree(proc.pid)
+        if proc.poll() is None:
+            proc.kill()
+
+
+@POSIX_ONLY
+def test_unreaped_zombie_child_reads_as_not_alive(tmp_path):
+    proc = _spawn(tmp_path, "pass")
+    start_time = _capture_start_time(proc.pid)
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            with open(f"/proc/{proc.pid}/stat") as fh:
+                if fh.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    break
+            time.sleep(0.05)
+        else:
+            raise AssertionError("child never became a zombie")
+        # exited but deliberately not reaped (no wait()/poll())
+        assert _raw_alive(proc.pid) is False
+        assert _pid_status(proc.pid, start_time) is False
+    finally:
+        proc.wait(timeout=10)

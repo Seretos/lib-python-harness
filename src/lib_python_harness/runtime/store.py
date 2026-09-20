@@ -10,6 +10,8 @@ needed because a record living only in this process's memory cannot satisfy
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -44,6 +46,23 @@ class InMemoryRunStore:
 
     def remove(self, run_id: str) -> None:
         self._records.pop(run_id, None)
+
+
+_REPLACE_RETRY_S = 1.0
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    """Read a record file, retrying briefly on `PermissionError`: on Windows
+    opening a file that a concurrent `put()` is replacing fails with a
+    sharing violation."""
+    deadline = time.monotonic() + _REPLACE_RETRY_S
+    while True:
+        try:
+            return json.loads(path.read_text())
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.005)
 
 
 def _json_default(value: Any) -> Any:
@@ -92,13 +111,30 @@ class FileRunStore:
     def put(self, run_id: str, record: dict[str, Any]) -> None:
         path = self._record_path(run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(_serialize(record), indent=2, default=_json_default))
+        payload = json.dumps(_serialize(record), indent=2, default=_json_default)
+        # Atomic: write a sibling temp file, then replace. On Windows the
+        # replace can fail with a sharing violation while another process has
+        # the destination open, so retry briefly rather than raise.
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(payload)
+        deadline = time.monotonic() + _REPLACE_RETRY_S
+        try:
+            while True:
+                try:
+                    os.replace(tmp, path)
+                    return
+                except PermissionError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def get(self, run_id: str) -> dict[str, Any] | None:
         path = self._record_path(run_id)
         if not path.exists():
             return None
-        return _deserialize(json.loads(path.read_text()))
+        return _deserialize(_read_json(path))
 
     def list(self) -> list[dict[str, Any]]:
         if not self.artifacts_dir.exists():
@@ -107,7 +143,7 @@ class FileRunStore:
         for run_dir in sorted(self.artifacts_dir.iterdir()):
             record_path = run_dir / "record.json"
             if record_path.exists():
-                records.append(_deserialize(json.loads(record_path.read_text())))
+                records.append(_deserialize(_read_json(record_path)))
         return records
 
     def remove(self, run_id: str) -> None:

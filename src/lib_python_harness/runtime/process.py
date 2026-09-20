@@ -99,7 +99,7 @@ def _capture_start_time(pid: int) -> float | None:
     """Best-effort process start time (epoch seconds), or `None` if it
     cannot be determined. Prefers `psutil` if already importable (no new
     runtime dependency is added by this library); falls back to
-    `/proc/<pid>/stat` on Linux.
+    `/proc/<pid>/stat` on Linux and `GetProcessTimes` (ctypes) on Windows.
     """
     try:
         import psutil  # type: ignore
@@ -111,6 +111,9 @@ def _capture_start_time(pid: int) -> float | None:
             return psutil.Process(pid).create_time()
         except Exception:
             return None
+
+    if _IS_WINDOWS:
+        return _windows_start_time(pid)
 
     try:
         with open(f"/proc/{pid}/stat") as fh:
@@ -135,7 +138,39 @@ def _raw_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    return True
+    # An exited-but-unreaped child (zombie) still answers `kill(pid, 0)`.
+    return not _is_zombie(pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    """`True` when `/proc/<pid>/stat` reports state `Z`; `False` when it says
+    anything else or `/proc` cannot be read (then `kill(pid, 0)` stands)."""
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            data = fh.read()
+        return data.rsplit(")", 1)[1].split()[0] == "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def _kernel32():
+    """`kernel32` with the signatures the process helpers below rely on."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return kernel32
 
 
 def _windows_alive(pid: int) -> bool:
@@ -146,11 +181,7 @@ def _windows_alive(pid: int) -> bool:
 
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     STILL_ACTIVE = 259
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32 = _kernel32()
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         # ERROR_ACCESS_DENIED (5): exists but not queryable -> alive;
@@ -165,10 +196,41 @@ def _windows_alive(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
+def _windows_start_time(pid: int) -> float | None:
+    """Process creation time (epoch seconds) via `GetProcessTimes`, or `None`
+    when the process cannot be opened. No `psutil` needed."""
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = _kernel32()
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            return None
+        ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        return (ticks - 116444736000000000) / 1e7  # 100 ns since 1601 -> epoch s
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _pid_status(pid: int, expected_start_time: float | None) -> bool | None:
     """Tri-state identity check: `True` (alive and it's the same process),
     `False` (gone, or a different process now holds this pid), `None`
-    (cannot tell — e.g. no `psutil` and `/proc` unreadable).
+    (cannot tell — e.g. no start time recorded or obtainable).
+
+    A matching start time alone is not "alive": a pid kept in existence by an
+    open handle (Windows) or an unreaped zombie (POSIX) still reports its
+    start time, so liveness is decided by `_raw_alive` as the last step.
     """
     if expected_start_time is None:
         return None
@@ -179,7 +241,7 @@ def _pid_status(pid: int, expected_start_time: float | None) -> bool | None:
 
     if abs(current - expected_start_time) > 1.0:
         return False
-    return True
+    return _raw_alive(pid)
 
 
 def _send_graceful_signal(pid: int) -> bool:

@@ -54,6 +54,32 @@ straight to a whole-tree force kill (`taskkill /T /F`).
   -> reap, all identity-checked against the pid's captured start time so a
   recycled pid is never signalled.
 
+## Observing a run from another process
+
+The starter of a run and its observer need not be the same process: with a
+shared `FileRunStore`, a `Harness` that holds no `Popen` can watch the run. No
+new `RunState` and no new edge are added to the table above.
+
+- `Harness.wait_for(run_id, timeout, poll_interval)` polls the record until it
+  is terminal. On timeout it returns the `RUNNING` result with
+  `timed_out=True` and signals nothing; it never calls `stop()`.
+- **Orphan reconciliation.** A `RUNNING` record whose recorded `pid` +
+  `start_time` no longer names a live process (an unreaped zombie counts as
+  not alive) is finalized by `poll()`, `list_runs()` and `wait_for()` without a
+  `Popen`: no exit code is known, so the terminal `result` event alone decides
+  `COMPLETED` vs `FAILED` (no such event -> `FAILED`). A trailing half-written
+  `events.jsonl` line is ignored. `wait_for` waits a short grace period after
+  the process vanished so a `stop()` running in the starter's process is
+  reported `CANCELLED`, not `FAILED`. On Windows the start time comes from
+  `GetProcessTimes` via `ctypes`; `psutil` is not required.
+- **Idempotent finalization.** Before writing, finalization re-reads the stored
+  record and keeps it when it is already terminal. There is no cross-process
+  lock, so this narrows the race rather than closing it.
+- `FileRunStore.put` writes a temp file and `os.replace`s it, so a reader never
+  sees a half-written `record.json`.
+- While `RUNNING`, `poll()` reports `event_count` and `last_event_at` from
+  `events.jsonl`; `list_runs()` returns `RunSummary` rows.
+
 ## Resume
 
 `Harness.resume(run_id, prompt, timeout=None)` sends a follow-up message to a

@@ -74,6 +74,20 @@ that cannot resume (`codex`, `mistral`, a custom provider without
 it is gone (`claude --resume` finds the session from any cwd, measured on
 Claude Code 2.1.278). See `docs/run-lifecycle.md`.
 
+A run can be observed from a process that did not start it (over a shared
+`FileRunStore`). `wait_for(run_id, timeout=None, poll_interval=0.25)` blocks
+until the run is terminal and returns its result; unlike `wait()`, an expired
+timeout **never cancels** the run — it returns the `RUNNING` result with
+`timed_out=True`. A run whose process vanished without being finalized is
+finalized by the observer (no exit code is known then, so the terminal
+`result` event alone decides `COMPLETED` vs `FAILED`; a `stop()` in the
+starter's process is still reported `CANCELLED`). `list_runs()` returns a
+`RunSummary` per stored run, oldest first, reconciling orphaned `RUNNING`
+records the same way `poll()` does. While a run is `RUNNING`, `poll()` also
+reports `event_count` and `last_event_at` (see `RunResult`). Both raise
+`HarnessError` for an unknown `run_id` (`wait_for`). See
+`docs/run-lifecycle.md`.
+
 ```python
 from lib_python_harness import Harness, RunSpec, Isolation
 
@@ -88,6 +102,8 @@ record = harness.start(
             isolation=Isolation.CLEAN, model="haiku")
 )
 harness.poll(record.run_id)
+observed = harness.wait_for(record.run_id, timeout=5.0)  # never cancels
+print(observed.timed_out, [s.label for s in harness.list_runs()])
 harness.stop(record.run_id, timeout=10.0)
 harness.cleanup(record.run_id, remove_cwd=False)
 
@@ -106,7 +122,9 @@ sit inside (or under) a git repository, and must be empty unless
 `allow_nonempty_cwd=True` is set — the one recorded opt-out, meant for
 diagnostics that need to plant files into the child's cwd, not for everyday
 use (an *emptied* directory can still map onto a project whose auto-memory
-is populated, since memory lives outside the cwd itself).
+is populated, since memory lives outside the cwd itself). `label` is an
+optional human-readable name stored on the run's record and shown by
+`Harness.list_runs()` (the prompt itself is never stored, only its hash).
 
 ```python
 from lib_python_harness import RunSpec, Isolation
@@ -117,6 +135,7 @@ spec = RunSpec(
     model="haiku",
     effort="high",
     system_prompt="You are a terse assistant.",
+    label="nightly-summary",
 )
 ```
 
@@ -127,6 +146,12 @@ Content fields (`text`, `is_error`, `subtype`, `structured_output`, `usage`,
 `cost`) come from the CLI's own terminal `result` event; `session_id`,
 `transcript_path`, `state` and `duration_s` are the harness's own
 run-identity/lifecycle bookkeeping, which no single stream event carries.
+`timed_out` is `True` only on a `Harness.wait_for` result whose timeout
+expired while the run kept running (`state` stays `RUNNING`). While `state` is
+`RUNNING`, `event_count` (complete lines in the run's `events.jsonl`) and
+`last_event_at` (that file's modification time, epoch seconds — how long ago
+the run last wrote, i.e. working or hung) show live progress; on a terminal
+result they are `0` / `None`.
 
 ```python
 from lib_python_harness import Harness, RunSpec, Isolation, RunResult
@@ -146,6 +171,19 @@ result = harness.run(
     RunSpec(prompt="Reply with exactly OK", isolation=Isolation.CLEAN, model="haiku")
 )
 print(describe(result))
+```
+
+### RunSummary
+
+One row of `Harness.list_runs()`: `run_id`, `state` (a `RunState`), `model`,
+`cwd` (a `Path` or `None`), `created_at` (epoch seconds) and `label` (from
+`RunSpec.label`, else `None`). Frozen. It deliberately carries no prompt, argv
+or environment.
+
+```python
+from lib_python_harness import Harness, RunSummary
+
+summaries: list[RunSummary] = Harness().list_runs()
 ```
 
 ### Isolation

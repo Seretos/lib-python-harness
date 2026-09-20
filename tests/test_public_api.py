@@ -31,6 +31,7 @@ EXPECTED_NAMES = {
     "Harness",
     "RunSpec",
     "RunResult",
+    "RunSummary",
     "Isolation",
     "RunState",
     "HarnessError",
@@ -79,7 +80,7 @@ REQUIRED_README_METHODS: dict[str, frozenset[str]] = {
     # Approach: "harness.py ... exposes Harness with run(spec) (= start +
     # wait, one code path), start, poll, stop(run_id, timeout=10.0),
     # cleanup(run_id, remove_cwd=False)".
-    "Harness": frozenset({"run", "start", "poll", "stop", "cleanup"}),
+    "Harness": frozenset({"run", "start", "poll", "stop", "cleanup", "wait_for", "list_runs"}),
     # R1/R7: RunResult-carrying fields named in the plan's own assertions
     # — non-empty session_id, existing transcript_path, state == COMPLETED,
     # duration < 60s / duration_s.

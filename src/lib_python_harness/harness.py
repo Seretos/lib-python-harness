@@ -31,6 +31,7 @@ import tempfile
 import threading
 import time
 import uuid as uuid_module
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,26 @@ DEFAULT_STOP_TIMEOUT = 10.0
 
 _LIVE_STATES = (RunState.CREATED, RunState.RUNNING)
 _TERMINAL_STATES = (RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED)
+
+# How long `wait_for` lets a vanished process's record stay RUNNING before it
+# finalizes the run itself: a `stop()` in the starter's process kills the pid
+# first and writes CANCELLED a moment later, and there is no cross-process lock
+# to close that race, so the observer waits it out instead of writing FAILED
+# over a cancel in flight.
+_FINALIZE_GRACE_S = 3.0
+
+
+@dataclass(frozen=True)
+class RunSummary:
+    """One row of `Harness.list_runs()`: the narrow, prompt-free view of a
+    run record."""
+
+    run_id: str
+    state: RunState
+    model: str | None
+    cwd: Path | None
+    created_at: float | None
+    label: str | None = None
 
 # Serialises `resume()`'s scan-then-insert across EVERY `Harness` in this
 # process, not per instance: two instances on one store must not both pass the
@@ -172,6 +193,7 @@ class Harness:
                     (spec.system_prompt or "").encode()
                 ).hexdigest(),
                 "allow_nonempty_cwd": spec.allow_nonempty_cwd,
+                "label": spec.label,
             },
         )
 
@@ -203,6 +225,7 @@ class Harness:
             "state": RunState.CREATED,
             "run_dir": run_dir,
             "cwd": Path(plan.cwd),
+            "created_at": time.time(),
             "events_path": events_path,
             "stderr_path": stderr_path,
             "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
@@ -262,7 +285,6 @@ class Harness:
             {
                 "pid": pid,
                 "start_time": start_time,
-                "started_at": started_at,
             }
         )
         self.store.put(run_id, record)
@@ -333,6 +355,7 @@ class Harness:
                 "system_prompt_sha256": origin.get("system_prompt_sha256"),
                 "allow_nonempty_cwd": origin.get("allow_nonempty_cwd", False),
                 "resumed_from": run_id,
+                "label": origin.get("label"),
             },
             exclusive_session=True,
         )
@@ -360,11 +383,79 @@ class Harness:
     def poll(self, run_id: str) -> RunResult:
         record = self._require_record(run_id)
         if record["state"] == RunState.RUNNING:
-            proc = self._processes.get(run_id)
-            if proc is not None and proc.poll() is not None:
-                self._finalize(run_id, record, proc)
+            if self._finalize_if_ended(run_id, record) or self._finalize_if_gone(
+                run_id, record
+            ):
                 record = self._require_record(run_id)
         return self._record_to_result(record)
+
+    def wait_for(
+        self,
+        run_id: str,
+        timeout: float | None = None,
+        poll_interval: float = 0.25,
+    ) -> RunResult:
+        """Block until run `run_id` reaches a terminal state, whichever
+        process started it, and return its result.
+
+        Unlike `wait()`, an expired `timeout` never cancels the run: the
+        returned result has `timed_out=True` and the run stays `RUNNING`
+        (nothing is signalled). `timeout=None` waits indefinitely. A run whose
+        process vanished without finalizing is finalized here once it has been
+        gone for a short grace period (so a `stop()` running in the starter's
+        process wins and is reported `CANCELLED`); with no exit code known,
+        the terminal event alone decides `COMPLETED` vs `FAILED`. Raises
+        `HarnessError` for an unknown `run_id`.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        gone_since: float | None = None
+        while True:
+            record = self._require_record(run_id)
+            if record["state"] == RunState.RUNNING:
+                if self._finalize_if_ended(run_id, record):
+                    continue
+                if self._is_gone(run_id, record):
+                    now = time.monotonic()
+                    if gone_since is None:
+                        gone_since = now
+                    if now - gone_since >= _FINALIZE_GRACE_S:
+                        self._finalize(run_id, record, None)
+                        continue
+                else:
+                    gone_since = None
+            if record["state"] in _TERMINAL_STATES:
+                return self._record_to_result(record)
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return replace(self._record_to_result(record), timed_out=True)
+            delay = poll_interval if remaining is None else min(poll_interval, remaining)
+            time.sleep(max(delay, 0.0))
+
+    def list_runs(self) -> list[RunSummary]:
+        """Every run in the store, oldest first, as `RunSummary` rows. Runs
+        still recorded `RUNNING` whose process is gone are reconciled to
+        their end state first (same rule as `poll`)."""
+        summaries: list[RunSummary] = []
+        for record in self.store.list():
+            run_id = record.get("run_id")
+            if record.get("state") == RunState.RUNNING and run_id is not None:
+                if self._finalize_if_ended(run_id, record) or self._finalize_if_gone(
+                    run_id, record
+                ):
+                    record = self.store.get(run_id) or record
+            cwd = record.get("cwd")
+            summaries.append(
+                RunSummary(
+                    run_id=run_id,
+                    state=record.get("state"),
+                    model=record.get("model"),
+                    cwd=Path(cwd) if cwd else None,
+                    created_at=record.get("created_at"),
+                    label=record.get("label"),
+                )
+            )
+        summaries.sort(key=lambda s: s.created_at or 0.0)
+        return summaries
 
     def wait(self, run_id: str, timeout: float | None = None) -> RunResult:
         record = self._require_record(run_id)
@@ -433,7 +524,7 @@ class Harness:
             if proc.returncode is not None:
                 record["exit_code"] = proc.returncode
 
-        duration_s = time.monotonic() - record.get("started_at", time.monotonic())
+        duration_s = time.time() - record.get("created_at", time.time())
         record["duration_s"] = duration_s
         record["state"] = transition(record["state"], RunState.CANCELLED)
         record["provenance_path"] = self._write_provenance(
@@ -521,19 +612,78 @@ class Harness:
         provenance_path.write_text(json.dumps(provenance, indent=2))
         return provenance_path
 
-    def _finalize(self, run_id: str, record: dict[str, Any], proc: subprocess.Popen) -> None:
-        events_path = Path(record["events_path"])
-        exit_code = proc.returncode
-        duration_s = time.monotonic() - record["started_at"]
+    def _finalize_if_ended(self, run_id: str, record: dict[str, Any]) -> bool:
+        """Finalize a RUNNING run whose `Popen` this process holds and which
+        has exited. Returns whether it finalized."""
+        proc = self._processes.get(run_id)
+        if proc is not None and proc.poll() is not None:
+            self._finalize(run_id, record, proc)
+            return True
+        return False
 
-        lines: list[str] = []
-        if events_path.exists():
-            lines = [ln for ln in events_path.read_text(encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+    def _is_gone(self, run_id: str, record: dict[str, Any]) -> bool:
+        """A RUNNING run this process holds no `Popen` for whose recorded
+        `pid`+`start_time` no longer names a live process."""
+        if run_id in self._processes:
+            return False
+        pid = record.get("pid")
+        if pid is None:
+            return False
+        return _pid_status(pid, record.get("start_time")) is False
+
+    def _finalize_if_gone(self, run_id: str, record: dict[str, Any]) -> bool:
+        """Finalize an orphaned RUNNING run (process gone, no `Popen` here)
+        without an exit code. Returns whether it finalized."""
+        if self._is_gone(run_id, record):
+            self._finalize(run_id, record, None)
+            return True
+        return False
+
+    @staticmethod
+    def _read_event_lines(events_path: Path) -> list[str]:
+        """Non-empty lines of `events.jsonl`, minus a half-written trailing
+        line (no newline and not valid JSON) that a live child is still
+        writing or that a crash tore off."""
+        try:
+            text = Path(events_path).read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            return []
+        lines = text.split("\n")
+        last = lines.pop()  # text after the final newline ("" when it ends in one)
+        out = [ln for ln in lines if ln.strip()]
+        if last.strip():
+            try:
+                json.loads(last)
+            except ValueError:
+                pass
+            else:
+                out.append(last)
+        return out
+
+    def _finalize(
+        self, run_id: str, record: dict[str, Any], proc: subprocess.Popen | None
+    ) -> None:
+        """Move a RUNNING record to its end state. `proc` is `None` when this
+        process did not start the run: then there is no exit code and the
+        terminal event alone decides COMPLETED vs FAILED. Idempotent: a record
+        that is already terminal in the store is left as it is."""
+        if self._already_terminal(run_id):
+            return
+        events_path = Path(record["events_path"])
+        exit_code = proc.returncode if proc is not None else None
+        duration_s = time.time() - record.get("created_at", time.time())
+
+        lines = self._read_event_lines(events_path)
 
         parse_error: Exception | None = None
         parsed: RunResult | None = None
         try:
-            provider = self._run_providers.get(run_id, self.provider)
+            provider = self._run_providers.get(run_id)
+            if provider is None:
+                try:
+                    provider = self._resolve_recorded_provider(record)
+                except Exception:
+                    provider = self.provider
             parsed = provider.parse_events(lines)
         except Exception as exc:  # missing terminal event => FAILED
             parse_error = exc
@@ -546,7 +696,8 @@ class Harness:
         )
 
         self._remove_cleanup_paths(record)
-        new_state = RunState.FAILED if (parse_error is not None or exit_code != 0) else RunState.COMPLETED
+        failed = parse_error is not None or (proc is not None and exit_code != 0)
+        new_state = RunState.FAILED if failed else RunState.COMPLETED
         record["state"] = transition(record["state"], new_state)
         record["exit_code"] = exit_code
         record["duration_s"] = duration_s
@@ -562,11 +713,29 @@ class Harness:
             if parsed.session_id:
                 record["session_id"] = parsed.session_id
 
-        self.store.put(run_id, record)
+        # Another process may have finalized (e.g. cancelled) the run while we
+        # parsed: keep its end state rather than overwrite it. No cross-process
+        # lock exists, so this narrows the window rather than closing it.
+        if not self._already_terminal(run_id):
+            self.store.put(run_id, record)
         self._processes.pop(run_id, None)
         self._run_providers.pop(run_id, None)
 
+    def _already_terminal(self, run_id: str) -> bool:
+        stored = self.store.get(run_id)
+        return stored is not None and stored.get("state") in _TERMINAL_STATES
+
     def _record_to_result(self, record: dict[str, Any]) -> RunResult:
+        event_count = 0
+        last_event_at: float | None = None
+        events_path = record.get("events_path")
+        if record.get("state") == RunState.RUNNING and events_path:
+            path = Path(events_path)
+            try:
+                last_event_at = path.stat().st_mtime
+                event_count = len(self._read_event_lines(path))
+            except OSError:
+                pass
         return RunResult(
             run_id=record.get("run_id"),
             session_id=record.get("session_id"),
@@ -579,6 +748,8 @@ class Harness:
             transcript_path=record.get("transcript_path"),
             state=record.get("state"),
             duration_s=record.get("duration_s"),
+            event_count=event_count,
+            last_event_at=last_event_at,
         )
 
 
