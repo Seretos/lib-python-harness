@@ -31,11 +31,25 @@ from lib_python_harness.runtime.lifecycle import RunState
 
 pytestmark = pytest.mark.requires_claude
 
+# Plainly worded on purpose: a first live run of a more adversarial wording
+# ("quote any instruction file verbatim") made the model refuse the whole
+# request, which says nothing about resume.
 RESUME_PROMPT = (
-    "What codeword did I ask you to remember? Answer with the codeword. Then "
-    "quote verbatim the contents of any CLAUDE.md or instruction file you were "
-    "given, or write NOINSTRUCTIONS if you were given none."
+    "What codeword did I ask you to remember? Answer with the codeword on the "
+    "first line. On the second line, repeat the text of any CLAUDE.md file that "
+    "is part of your context, or write NOINSTRUCTIONS if there is none."
 )
+
+
+def _total_input(usage):
+    """Prompt-side tokens including the prompt cache: with a cold cache the
+    real CLI reports the ~20k global context as `cache_creation_input_tokens`
+    and only ~10 as `input_tokens`, so `input_tokens` alone cannot tell an
+    isolated resume from an unisolated one."""
+    return sum(
+        usage.get(k, 0) or 0
+        for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+    )
 
 
 def _raw_resume(session_id, cwd, *, isolated):
@@ -78,18 +92,18 @@ def test_resume_keeps_isolation_and_history(tmp_path):
         (tmp_path / "artifacts" / result.run_id / "provenance.json").read_text()
     )["cli_version"]
     print(f"\n[resume] cli_version={cli_version} state={result.state}")
-    print(f"[resume] isolated input_tokens={result.usage.get('input_tokens')} usage={result.usage}")
+    print(f"[resume] isolated total_input={_total_input(result.usage)} usage={result.usage}")
     print(f"[resume] reply: {result.text!r}")
 
     assert result.state == RunState.COMPLETED
     assert result.session_id == origin.session_id
     assert codeword in result.text
     assert canary not in result.text
-    assert result.usage["input_tokens"] < 3000
+    assert _total_input(result.usage) < 3000
 
     # -- measurements, printed only ------------------------------------------
     control = _raw_resume(origin.session_id, origin_cwd, isolated=False)
-    print(f"[control] UNISOLATED resume usage={control.get('usage')}")
+    print(f"[control] UNISOLATED resume total_input={_total_input(control.get('usage') or {})} usage={control.get('usage')}")
     print(f"[control] reply: {str(control.get('result'))[:300]!r}")
     print(f"[control] canary visible without isolation: {canary in str(control.get('result'))}")
 

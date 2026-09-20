@@ -5,13 +5,18 @@
 (`providers.codex_cli`) and `MistralCliProvider` (`providers.mistral_cli`)
 are the implementations; `RunSpec.provider` picks one
 by name. A `Provider` carries its `name`, the `binary_argv` the harness
-prepends at spawn time, and exactly two responsibilities:
+prepends at spawn time, and three responsibilities:
 
 - `build_launch_plan(spec, session_id=..., run_dir=...)` — turn a `RunSpec`
   into an argv/cwd/env/stdin `LaunchPlan`, enforcing whatever isolation
   recipe its `Isolation` member implies.
 - `parse_events(lines)` — turn the provider's own event stream (one JSON
   object per line for `ClaudeCliProvider`) into a `RunResult`.
+- `build_resume_plan(provider_argv=..., session_id=..., cwd=..., prompt=...)`
+  — turn a finished run's recorded argv into the plan for a follow-up turn on
+  the same session (`Harness.resume`), replaying its isolation flags. A
+  provider whose CLI cannot do that raises `UnsupportedByProvider`; an
+  injected provider without the method is refused the same way.
 
 What a further (e.g. Mistral) provider is explicitly *not* required to add to
 this protocol (named per the plan-critic note that a blanket "anything else
@@ -27,8 +32,7 @@ is open" sentence documents no boundary at all):
   by definition; a future non-CLEAN isolation profile would need a new
   `Isolation` member, not a `Provider` method);
 - multi-turn conversation assembly (`RunSpec` carries exactly one `prompt`
-  per call; resuming a session is a separate CLI invocation, not a
-  `Provider` method — see `Harness`/README for the resume pattern).
+  per call; a follow-up turn is a separate run, see `Harness.resume`).
 """
 from __future__ import annotations
 
@@ -181,5 +185,21 @@ class Provider(Protocol):
 
         Raises if the stream ends without a terminal result event — a
         truncated stream is never silently accepted as success.
+        """
+        ...
+
+    def build_resume_plan(
+        self,
+        *,
+        provider_argv: list[str],
+        session_id: str,
+        cwd: str | Path | None,
+        prompt: str,
+    ) -> LaunchPlan:
+        """Plan a follow-up turn on the finished session `session_id`.
+
+        `provider_argv` is the origin run's recorded argv without the binary;
+        `cwd` its recorded working directory. Raises `UnsupportedByProvider`
+        when the CLI cannot resume in a way the harness can replay isolated.
         """
         ...

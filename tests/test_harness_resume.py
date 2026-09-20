@@ -290,9 +290,12 @@ def test_concurrent_resume_of_one_session_lets_exactly_one_through(tmp_path, sha
 
 
 class _NoResumeProvider:
-    """A custom provider that never learned `build_resume_plan`."""
+    """A custom provider that never learned `build_resume_plan`. It is named
+    "claude" on purpose: the recorded provider name is one Harness supports, so
+    only a capability check on the injected object can produce the refusal (a
+    provider-name allowlist would let this through)."""
 
-    name = "custom"
+    name = "claude"
     binary_argv = ["custom"]
 
     def build_launch_plan(self, spec, *, session_id, run_dir):  # pragma: no cover
@@ -315,9 +318,9 @@ def test_resume_is_unsupported_for_non_claude_providers(spawn_calls, provider):
 
 def test_resume_with_provider_lacking_build_resume_plan_is_unsupported(spawn_calls):
     store = InMemoryRunStore()
-    _seed(store, "run-1", RunState.COMPLETED, provider="custom")
+    _seed(store, "run-1", RunState.COMPLETED, provider="claude")
 
-    with pytest.raises(UnsupportedByProvider, match="custom"):
+    with pytest.raises(UnsupportedByProvider, match="build_resume_plan"):
         Harness(store=store, provider=_NoResumeProvider()).resume("run-1", "hi")
 
     assert spawn_calls == []

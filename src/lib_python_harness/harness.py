@@ -28,12 +28,13 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid as uuid_module
 from pathlib import Path
 from typing import Any
 
-from .errors import HarnessError, RunIdentityUnverifiedError
+from .errors import HarnessError, RunIdentityUnverifiedError, UnsupportedByProvider
 from .providers.base import Provider, RunResult, RunSpec
 from .providers.claude_cli import ClaudeCliProvider
 from .providers.codex_cli import CodexCliProvider
@@ -51,6 +52,15 @@ from .runtime.process import (
 from .runtime.store import InMemoryRunStore, RunStore
 
 DEFAULT_STOP_TIMEOUT = 10.0
+
+_LIVE_STATES = (RunState.CREATED, RunState.RUNNING)
+_TERMINAL_STATES = (RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED)
+
+# Serialises `resume()`'s scan-then-insert across EVERY `Harness` in this
+# process, not per instance: two instances on one store must not both pass the
+# same-session liveness guard. Cross-process exclusion is not provided (a
+# shared `FileRunStore` has no cross-process lock).
+_SESSION_LOCK = threading.Lock()
 
 _VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
 
@@ -148,6 +158,39 @@ class Harness:
         # ever recorded, if spec.cwd fails the CLEAN recipe or the provider
         # cannot honour a field.
         plan = provider.build_launch_plan(spec, session_id=session_id, run_dir=run_dir)
+        return self._launch(
+            provider,
+            plan,
+            run_id=run_id,
+            session_id=session_id,
+            run_dir=run_dir,
+            prompt=spec.prompt,
+            fields={
+                "model": spec.model,
+                "effort": spec.effort,
+                "system_prompt_sha256": hashlib.sha256(
+                    (spec.system_prompt or "").encode()
+                ).hexdigest(),
+                "allow_nonempty_cwd": spec.allow_nonempty_cwd,
+            },
+        )
+
+    def _launch(
+        self,
+        provider: Provider,
+        plan: Any,
+        *,
+        run_id: str,
+        session_id: str,
+        run_dir: Path,
+        prompt: str,
+        fields: dict[str, Any],
+        exclusive_session: bool = False,
+    ) -> RunResult:
+        """Record, spawn and return the RUNNING result — the one code path
+        under `start()` and `resume()`. With `exclusive_session`, the
+        same-session liveness scan and the first `put()` share one
+        process-wide critical section."""
         self._run_providers[run_id] = provider
 
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -162,15 +205,21 @@ class Harness:
             "cwd": Path(plan.cwd),
             "events_path": events_path,
             "stderr_path": stderr_path,
-            "model": spec.model,
-            "effort": spec.effort,
-            "prompt_sha256": hashlib.sha256(spec.prompt.encode()).hexdigest(),
-            "system_prompt_sha256": hashlib.sha256(
-                (spec.system_prompt or "").encode()
-            ).hexdigest(),
-            "allow_nonempty_cwd": spec.allow_nonempty_cwd,
+            "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
             "provider": provider.name,
+            **fields,
         }
+        if exclusive_session:
+            with _SESSION_LOCK:
+                try:
+                    self._require_session_idle(session_id)
+                except HarnessError:
+                    self._run_providers.pop(run_id, None)
+                    raise
+                self.store.put(run_id, record)
+        else:
+            self.store.put(run_id, record)
+
         self.store.put(run_id, record)
 
         binary_argv = list(self.claude_argv or provider.binary_argv)
@@ -221,6 +270,94 @@ class Harness:
         self.store.put(run_id, record)
 
         return self._record_to_result(record)
+
+    def resume(
+        self, run_id: str, prompt: str, *, timeout: float | None = None
+    ) -> RunResult:
+        """Send a follow-up `prompt` to the finished run `run_id`, blocking
+        until the new run ends (`start` + `wait`, one code path).
+
+        A resume is a NEW run: new `run_id`, the origin's `session_id`, and
+        `resumed_from` = the origin's `run_id`; the origin record is left
+        untouched. The origin's argv is replayed by the provider (isolation
+        flags included), not rebuilt, and runs in the origin's cwd (a fresh
+        temp directory if it no longer exists).
+
+        Raises `HarnessError` for an unknown run, a `CREATED`/`RUNNING`
+        origin (resume is terminal-only) or a session that already has a live
+        run; `UnsupportedByProvider` when the origin's provider cannot resume.
+        A `CANCELLED` origin resumes mechanically, but only the transcript
+        the CLI actually wrote exists, so the answer may rest on a partial
+        turn. Same-session exclusion holds across every `Harness` in this
+        process; it is NOT enforced across processes.
+        """
+        origin = self._require_record(run_id)
+        state = origin["state"]
+        if state not in _TERMINAL_STATES:
+            raise HarnessError(
+                f"cannot resume run {run_id} in state {state.name}: "
+                "resume is only allowed for a COMPLETED, FAILED or CANCELLED run"
+            )
+
+        provider = self._resolve_recorded_provider(origin)
+        builder = getattr(provider, "build_resume_plan", None)
+        if builder is None:
+            raise UnsupportedByProvider(
+                f"provider {provider.name!r} does not support resume "
+                "(it has no build_resume_plan)"
+            )
+
+        session_id = origin["session_id"]
+        # Early, lock-free refusal so nothing is built for a doomed resume;
+        # `_launch(exclusive_session=True)` repeats it atomically with the put.
+        self._require_session_idle(session_id)
+        binary_argv = origin.get("binary_argv") or []
+        provider_argv = list(origin["argv"])[len(binary_argv):]
+        plan = builder(
+            provider_argv=provider_argv,
+            session_id=session_id,
+            cwd=origin.get("cwd"),
+            prompt=prompt,
+        )
+
+        new_run_id = str(uuid_module.uuid4())
+        run_dir = Path(origin["run_dir"]).parent / new_run_id
+        started = self._launch(
+            provider,
+            plan,
+            run_id=new_run_id,
+            session_id=session_id,
+            run_dir=run_dir,
+            prompt=prompt,
+            fields={
+                "model": origin.get("model"),
+                "effort": origin.get("effort"),
+                "system_prompt_sha256": origin.get("system_prompt_sha256"),
+                "allow_nonempty_cwd": origin.get("allow_nonempty_cwd", False),
+                "resumed_from": run_id,
+            },
+            exclusive_session=True,
+        )
+        return self.wait(started.run_id, timeout=timeout)
+
+    def _resolve_recorded_provider(self, record: dict[str, Any]) -> Provider:
+        name = record.get("provider") or "claude"
+        if name in self._injected:
+            return self._injected[name]
+        cls = PROVIDERS.get(name)
+        if cls is None:
+            raise UnsupportedByProvider(
+                f"provider {name!r} of this run is unknown; cannot resume it"
+            )
+        return cls()
+
+    def _require_session_idle(self, session_id: str) -> None:
+        for other in self.store.list():
+            if other.get("session_id") == session_id and other.get("state") in _LIVE_STATES:
+                raise HarnessError(
+                    f"cannot resume session {session_id}: run {other.get('run_id')} "
+                    f"is still {other['state'].name}"
+                )
 
     def poll(self, run_id: str) -> RunResult:
         record = self._require_record(run_id)
@@ -313,9 +450,10 @@ class Harness:
     def cleanup(self, run_id: str, remove_cwd: bool = False) -> None:
         """Drop the run's record from the store and stop tracking its
         process handle. Never touches the CLI transcript. Removes the run's
-        cwd only when `remove_cwd=True` (default `False`) — whether resuming
-        a session needs its original cwd is unverified, so the safer default
-        is to leave it. The artifacts dir (`provenance.json`, `events.jsonl`,
+        cwd only when `remove_cwd=True` (default `False`): resume does not
+        need the original cwd (see `docs/run-lifecycle.md`), but a cwd may
+        hold files the caller cares about, so the safer default is to leave
+        it. The artifacts dir (`provenance.json`, `events.jsonl`,
         `stderr.txt`) is never deleted by the library.
         """
         record = self._require_record(run_id)
@@ -379,6 +517,7 @@ class Harness:
             # the fact only - never the contents/paths of the private home
             "scrubbed_home": bool(record.get("cleanup_paths")),
             "session_id": record.get("session_id"),
+            "resumed_from": record.get("resumed_from"),
         }
         provenance_path = Path(record["run_dir"]) / "provenance.json"
         provenance_path.write_text(json.dumps(provenance, indent=2))

@@ -146,6 +146,14 @@ class CodexCliProvider:
             cleanup_paths=(str(home),),
         )
 
+    def build_resume_plan(
+        self, *, provider_argv: list[str], session_id: str, cwd: str | None, prompt: str
+    ) -> LaunchPlan:
+        raise UnsupportedByProvider(
+            "the codex provider has no isolated resume the harness can replay "
+            "(its CLEAN runs are --ephemeral and not resumable)"
+        )
+
     def parse_events(self, lines: Iterable[str]) -> RunResult:
         session_id: str | None = None
         text = ""
