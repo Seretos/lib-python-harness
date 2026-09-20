@@ -49,6 +49,26 @@ def main() -> int:
     init_event = {"type": "system", "subtype": "init", "session_id": session_id}
     print(json.dumps(init_event), flush=True)
 
+    # --ticks <n> / --tick-interval <s>: emit n assistant events, spaced
+    # tick-interval apart, before the terminal event -- a run whose events
+    # log visibly grows while it is alive (live-progress tests).
+    if "--ticks" in argv:
+        ticks = int(argv[argv.index("--ticks") + 1])
+        interval = 0.3
+        if "--tick-interval" in argv:
+            interval = float(argv[argv.index("--tick-interval") + 1])
+        for n in range(ticks):
+            time.sleep(interval)
+            print(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {"content": [{"type": "text", "text": f"tick {n}"}]},
+                    }
+                ),
+                flush=True,
+            )
+
     if "--sleep" in argv:
         idx = argv.index("--sleep")
         seconds = float(argv[idx + 1]) if idx + 1 < len(argv) else 5.0
@@ -70,9 +90,16 @@ def main() -> int:
             "total_cost_usd": 0.0001,
         },
     ]
+    # --no-result: end without a terminal `result` event (a truncated
+    # stream). --exit-code <n>: the process exit code (default 0).
+    exit_code = 0
+    if "--exit-code" in argv:
+        exit_code = int(argv[argv.index("--exit-code") + 1])
+    if "--no-result" in argv:
+        return exit_code
     for event in events:
         print(json.dumps(event), flush=True)
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

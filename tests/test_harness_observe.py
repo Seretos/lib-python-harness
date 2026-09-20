@@ -1,0 +1,403 @@
+"""Driving tests for package 13 — observing a run from a process that did not
+start it (`Harness.wait_for`, `Harness.list_runs`, live progress in `poll`).
+
+Real two-process tests: `tests/fixtures/start_run.py` is the *starter* (it
+`start()`s a `fake_claude.py` child and exits, or `stop()`s it), and the test
+process is the foreign *observer* with a fresh `Harness(FileRunStore(dir))`.
+None of them is POSIX-only.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from lib_python_harness import (
+    FileRunStore,
+    Harness,
+    HarnessError,
+    InMemoryRunStore,
+    Isolation,
+    RunSpec,
+    RunState,
+)
+from lib_python_harness.runtime.process import _capture_start_time, _pid_status
+
+FIXTURES = Path(__file__).parent / "fixtures"
+FAKE_CLAUDE = FIXTURES / "fake_claude.py"
+START_RUN = FIXTURES / "start_run.py"
+SRC = Path(__file__).resolve().parent.parent / "src"
+
+PROMPT = "SECRET-PROMPT-TEXT-4711"
+
+
+def _starter_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(SRC)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
+    return env
+
+
+def _launch_starter(artifacts, *starter_args, fake_args=()):
+    """Spawn the starter; return (starter_proc, run_id) once it printed the id."""
+    cmd = [sys.executable, str(START_RUN), str(artifacts), *starter_args]
+    if fake_args:
+        cmd += ["--", *fake_args]
+    proc = subprocess.Popen(
+        cmd, env=_starter_env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    line = proc.stdout.readline()
+    if not line:
+        raise AssertionError(f"starter printed no run_id; stderr:\n{proc.stderr.read()}")
+    return proc, json.loads(line)["run_id"]
+
+
+def _start_and_let_starter_exit(artifacts, *starter_args, fake_args=()):
+    proc, run_id = _launch_starter(artifacts, *starter_args, fake_args=fake_args)
+    assert proc.wait(timeout=30) == 0, proc.stderr.read()
+    return run_id
+
+
+def _observer(artifacts) -> Harness:
+    return Harness(store=FileRunStore(artifacts))
+
+
+# -- R1 ----------------------------------------------------------------------
+
+
+def test_wait_for_returns_completed_from_a_foreign_process(tmp_path):
+    run_id = _start_and_let_starter_exit(tmp_path, fake_args=["--sleep", "3"])
+    observer = _observer(tmp_path)
+
+    began = time.monotonic()
+    result = observer.wait_for(run_id, timeout=30)
+    elapsed = time.monotonic() - began
+
+    assert result.state is RunState.COMPLETED
+    assert result.text == "OK"
+    assert result.usage
+    assert result.timed_out is False
+    assert elapsed >= 1.0, "wait_for returned before the child could have finished"
+    assert FileRunStore(tmp_path).get(run_id)["state"] is RunState.COMPLETED
+
+
+def test_wait_for_unknown_run_id_raises_harness_error(tmp_path):
+    with pytest.raises(HarnessError):
+        _observer(tmp_path).wait_for("no-such-run", timeout=1)
+
+
+def test_wait_for_on_a_terminal_record_returns_immediately():
+    store = InMemoryRunStore()
+    store.put(
+        "run-1",
+        {"run_id": "run-1", "state": RunState.COMPLETED, "text": "done", "usage": {"a": 1}},
+    )
+    began = time.monotonic()
+    result = Harness(store=store).wait_for("run-1", timeout=30)
+    assert time.monotonic() - began < 2.0
+    assert result.state is RunState.COMPLETED
+    assert result.text == "done"
+    assert result.timed_out is False
+
+
+# -- R2 ----------------------------------------------------------------------
+
+
+def test_wait_for_timeout_leaves_the_run_running(tmp_path):
+    run_id = _start_and_let_starter_exit(tmp_path, fake_args=["--sleep", "4"])
+    observer = _observer(tmp_path)
+
+    began = time.monotonic()
+    first = observer.wait_for(run_id, timeout=1)
+    elapsed = time.monotonic() - began
+
+    assert first.timed_out is True
+    assert first.state is RunState.RUNNING
+    assert 0.8 <= elapsed < 3.5
+    record = FileRunStore(tmp_path).get(run_id)
+    assert record["state"] is RunState.RUNNING
+    assert _pid_status(record["pid"], record["start_time"]) is True, "wait_for killed the child"
+    assert observer.poll(run_id).state is RunState.RUNNING
+
+    second = observer.wait_for(run_id, timeout=30)
+    assert second.state is RunState.COMPLETED
+    assert second.timed_out is False
+    assert second.text == "OK"
+
+
+# -- R3 ----------------------------------------------------------------------
+
+
+def test_wait_for_reports_cancelled_when_another_process_stops_the_run(tmp_path):
+    starter, run_id = _launch_starter(
+        tmp_path, "--stop-after", "1", fake_args=["--sleep", "10"]
+    )
+    try:
+        result = _observer(tmp_path).wait_for(run_id, timeout=30)
+    finally:
+        starter.wait(timeout=60)
+
+    assert result.state is RunState.CANCELLED
+    record = FileRunStore(tmp_path).get(run_id)
+    assert record["state"] is RunState.CANCELLED
+    assert Path(record["provenance_path"]).exists()
+
+
+# -- R4 ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fake_args", [["--no-result"], ["--no-result", "--exit-code", "2"]]
+)
+def test_wait_for_reports_failed_without_a_terminal_event(tmp_path, fake_args):
+    run_id = _start_and_let_starter_exit(tmp_path, fake_args=["--sleep", "1", *fake_args])
+
+    result = _observer(tmp_path).wait_for(run_id, timeout=30)
+
+    assert result.state is RunState.FAILED
+    record = FileRunStore(tmp_path).get(run_id)
+    assert record["state"] is RunState.FAILED
+    assert record["exit_code"] is None  # unknowable cross-process
+    assert Path(record["provenance_path"]).exists()
+
+
+def _dead_run_record(tmp_path, events_text: str) -> dict:
+    """A RUNNING record for a process that already exited, with a hand-written
+    events log (the shape of a run whose starter is gone)."""
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1)"])
+    start_time = _capture_start_time(child.pid)
+    child.wait(timeout=30)
+    run_dir = tmp_path / "torn-run"
+    run_dir.mkdir()
+    events = run_dir / "events.jsonl"
+    events.write_bytes(events_text.encode())
+    return {
+        "run_id": "torn-run",
+        "session_id": "00000000-0000-4000-8000-000000000001",
+        "state": RunState.RUNNING,
+        "run_dir": run_dir,
+        "cwd": tmp_path,
+        "events_path": events,
+        "stderr_path": run_dir / "stderr.txt",
+        "provider": "claude",
+        "model": "haiku",
+        "argv": ["claude"],
+        "binary_argv": [sys.executable, str(FAKE_CLAUDE)],
+        "cleanup_paths": [],
+        "pid": child.pid,
+        "start_time": start_time,
+        "created_at": time.time() - 2,
+    }
+
+
+_INIT = json.dumps({"type": "system", "subtype": "init", "session_id": "s"})
+_RESULT = json.dumps(
+    {
+        "type": "result", "subtype": "success", "is_error": False, "result": "OK",
+        "session_id": "s", "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+)
+
+
+def test_wait_for_torn_trailing_line_without_result_is_failed(tmp_path):
+    record = _dead_run_record(tmp_path, _INIT + "\n" + '{"type": "res')
+    store = FileRunStore(tmp_path)
+    store.put("torn-run", record)
+
+    result = Harness(store=store).wait_for("torn-run", timeout=15)
+
+    assert result.state is RunState.FAILED
+
+
+def test_wait_for_complete_result_plus_torn_trailing_line_is_completed(tmp_path):
+    record = _dead_run_record(tmp_path, _INIT + "\n" + _RESULT + "\n" + '{"type": "assi')
+    store = FileRunStore(tmp_path)
+    store.put("torn-run", record)
+
+    result = Harness(store=store).wait_for("torn-run", timeout=15)
+
+    assert result.state is RunState.COMPLETED
+    assert result.text == "OK"
+
+
+# -- R6 ----------------------------------------------------------------------
+
+
+def test_finalize_does_not_overwrite_a_terminal_record(tmp_path):
+    run_dir = tmp_path / "run-x"
+    run_dir.mkdir()
+    events = run_dir / "events.jsonl"
+    events.write_text(_INIT + "\n" + _RESULT + "\n")
+    stale = {
+        "run_id": "run-x",
+        "session_id": "s",
+        "state": RunState.RUNNING,
+        "run_dir": run_dir,
+        "cwd": tmp_path,
+        "events_path": events,
+        "provider": "claude",
+        "argv": ["claude"],
+        "binary_argv": [sys.executable, str(FAKE_CLAUDE)],
+        "cleanup_paths": [],
+        "started_at": time.monotonic(),
+        "created_at": time.time(),
+    }
+    store = InMemoryRunStore()
+    harness = Harness(store=store)
+    # Another process cancelled the run after this Harness read its copy.
+    store.put("run-x", {**stale, "state": RunState.CANCELLED})
+
+    harness._finalize("run-x", dict(stale), SimpleNamespace(returncode=0))
+
+    assert store.get("run-x")["state"] is RunState.CANCELLED
+    assert harness.poll("run-x").state is RunState.CANCELLED
+
+
+# -- R7 ----------------------------------------------------------------------
+
+
+def test_list_runs_sees_runs_started_by_another_process(tmp_path):
+    labelled = _start_and_let_starter_exit(
+        tmp_path, "--label", "nightly", "--prompt", PROMPT, fake_args=["--sleep", "1"]
+    )
+    plain = _start_and_let_starter_exit(
+        tmp_path, "--prompt", PROMPT, fake_args=["--sleep", "1"]
+    )
+
+    observer = _observer(tmp_path)
+    summaries = {s.run_id: s for s in observer.list_runs()}
+
+    assert set(summaries) == {labelled, plain}
+    assert summaries[labelled].label == "nightly"
+    assert summaries[plain].label is None
+    for s in summaries.values():
+        assert isinstance(s.state, RunState)
+        assert s.model == "haiku"
+        assert s.cwd
+        assert isinstance(s.created_at, float) and s.created_at > 0
+    assert summaries[labelled].created_at <= summaries[plain].created_at
+
+    for run_id in (labelled, plain):
+        raw = (tmp_path / run_id / "record.json").read_text()
+        assert PROMPT not in raw
+        assert PROMPT not in repr(summaries[run_id])
+        observer.wait_for(run_id, timeout=30)
+
+
+# -- R8 ----------------------------------------------------------------------
+
+
+def _harness_with_fake(store, *fake_args) -> Harness:
+    return Harness(
+        store=store, claude_argv=[sys.executable, str(FAKE_CLAUDE), *fake_args]
+    )
+
+
+def _spec(tmp_path) -> RunSpec:
+    return RunSpec(
+        prompt="Reply with exactly OK",
+        isolation=Isolation.CLEAN,
+        model="haiku",
+        artifacts_dir=tmp_path,
+    )
+
+
+def test_poll_reports_growing_progress_while_running(tmp_path):
+    harness = _harness_with_fake(
+        InMemoryRunStore(), "--ticks", "6", "--tick-interval", "0.3"
+    )
+    run_id = harness.start(_spec(tmp_path)).run_id
+
+    deadline = time.monotonic() + 15
+    first = harness.poll(run_id)
+    while first.event_count < 1 and time.monotonic() < deadline:
+        time.sleep(0.05)
+        first = harness.poll(run_id)
+    assert first.state is RunState.RUNNING
+    assert first.event_count >= 1
+    assert isinstance(first.last_event_at, float)
+
+    second = harness.poll(run_id)
+    while second.event_count <= first.event_count and time.monotonic() < deadline:
+        time.sleep(0.05)
+        second = harness.poll(run_id)
+
+    assert second.state is RunState.RUNNING
+    assert second.event_count > first.event_count
+    # would fail if last_event_at were constant (e.g. the start time)
+    assert second.last_event_at > first.last_event_at
+
+    final = harness.wait(run_id, timeout=30)
+    assert final.state is RunState.COMPLETED
+    assert final.text == "OK"
+    assert final.event_count == 0  # terminal results carry no progress
+    assert final.last_event_at is None
+
+
+def test_poll_does_not_count_a_torn_trailing_line(tmp_path):
+    events = tmp_path / "events.jsonl"
+    events.write_bytes((_INIT + "\n" + _INIT + "\n" + '{"type": "assi').encode())
+    store = InMemoryRunStore()
+    pid = os.getpid()
+    store.put(
+        "live",
+        {
+            "run_id": "live",
+            "state": RunState.RUNNING,
+            "events_path": events,
+            "run_dir": tmp_path,
+            "provider": "claude",
+            "pid": pid,
+            "start_time": _capture_start_time(pid),
+            "created_at": time.time(),
+        },
+    )
+
+    result = Harness(store=store).poll("live")
+
+    assert result.state is RunState.RUNNING
+    assert result.event_count == 2
+
+
+# -- R9 ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fake_args, expected",
+    [(["--no-result"], RunState.FAILED), ([], RunState.COMPLETED)],
+)
+def test_list_runs_reconciles_an_orphaned_run(tmp_path, fake_args, expected):
+    run_id = _start_and_let_starter_exit(tmp_path, fake_args=fake_args)
+    observer = _observer(tmp_path)
+
+    deadline = time.monotonic() + 30
+    state = None
+    while time.monotonic() < deadline:
+        (summary,) = observer.list_runs()
+        state = summary.state
+        if state is not RunState.RUNNING:
+            break
+        time.sleep(0.2)
+
+    assert state is expected
+    assert FileRunStore(tmp_path).get(run_id)["state"] is expected
+
+
+def test_poll_reconciles_an_orphaned_run(tmp_path):
+    run_id = _start_and_let_starter_exit(tmp_path, fake_args=["--no-result"])
+    observer = _observer(tmp_path)
+
+    deadline = time.monotonic() + 30
+    result = observer.poll(run_id)
+    while result.state is RunState.RUNNING and time.monotonic() < deadline:
+        time.sleep(0.2)
+        result = observer.poll(run_id)
+
+    assert result.state is RunState.FAILED

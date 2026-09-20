@@ -88,6 +88,7 @@ class RunSpec:
     allow_nonempty_cwd: bool = False
     artifacts_dir: str | Path | None = None
     timeout: float | None = None
+    label: str | None = None
 
     # -- Isolation.INHERIT only (all None-defaulted -> CLEAN's argv is
     # unaffected by their mere presence on the dataclass). Each one is a
@@ -158,6 +159,9 @@ class RunResult:
     transcript_path: Path | None = None
     state: Any | None = None
     duration_s: float | None = None
+    timed_out: bool = False
+    event_count: int = 0
+    last_event_at: float | None = None
 
 
 class Provider(Protocol):
