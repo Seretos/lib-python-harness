@@ -11,7 +11,7 @@ Pin an exact tag (recommended) or the floating major-release branch:
 
 ```bash
 # exact tag
-pip install "git+https://github.com/Seretos/lib-python-harness@v0.1.0"
+pip install "git+https://github.com/Seretos/lib-python-harness@v0.0.1"
 
 # floating: latest 0.x.y release
 pip install "git+https://github.com/Seretos/lib-python-harness@release/0.x"
@@ -21,7 +21,7 @@ Or in a consumer's `pyproject.toml`:
 
 ```toml
 dependencies = [
-  "lib-python-harness @ git+https://github.com/Seretos/lib-python-harness@v0.1.0",
+  "lib-python-harness @ git+https://github.com/Seretos/lib-python-harness@v0.0.1",
 ]
 ```
 
@@ -239,7 +239,9 @@ except UnsafeCwdError:
 
 ### __version__
 
-The installed package version.
+The installed package version, read from the distribution metadata. When the
+package is imported from a source tree without being installed, it is
+`"0.0.0+unknown"`.
 
 ```python
 import lib_python_harness
@@ -834,4 +836,5 @@ python -m pytest -m requires_mistral -q -s
 
 Semantic versioning. The `version` in `pyproject.toml` is a placeholder
 on `main` — the release workflow stamps it onto the `release/Nx` branch
-and the `vX.Y.Z` tag. Don't hand-bump it.
+and the `vX.Y.Z` tag. Don't hand-bump it. `__version__` is derived from the
+installed distribution's metadata and is never hand-edited.

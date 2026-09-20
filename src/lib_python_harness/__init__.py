@@ -2,10 +2,13 @@
 
 Public re-exports. Everything a consumer is meant to import lives here;
 adding, removing, or changing the signature of a name in `__all__` is a
-breaking change. Keep `__all__`, the README, and the version in sync.
+breaking change. Keep `__all__` and the README in sync; `__version__` is
+derived from the installed distribution metadata, never hand-edited.
 See `README.md` for usage.
 """
 from __future__ import annotations
+
+from importlib import metadata as _metadata
 
 from .agents.model import AgentDefinition
 from .agents.sources import ClaudeMarkdownSource, DefinitionSource
@@ -30,7 +33,10 @@ from .resolve import resolve
 from .runtime.lifecycle import RunState
 from .runtime.store import FileRunStore, InMemoryRunStore, RunStore
 
-__version__ = "0.1.0"
+try:
+    __version__ = _metadata.version("lib-python-harness")
+except _metadata.PackageNotFoundError:
+    __version__ = "0.0.0+unknown"
 
 __all__ = [
     "AgentDefinition",
