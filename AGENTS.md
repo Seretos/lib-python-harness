@@ -52,25 +52,18 @@ dispatches the work package. It is never done by hand on `main`.
 
 ## Downstream dependency notifications
 
-When a consumer repo starts pinning this lib, wire it up so each release
-opens a "bump me" ticket there automatically:
+Each release opens a "bump me" ticket in every consumer repo automatically,
+via one step in `.github/workflows/release.yml` that calls the central action
+`Seretos/agent-plugin-dev/.github/actions/notify-consumers@main`. The action
+owns ticket title, body, labels and board placement; this repo only supplies
+the facts (version, source repo, consumer list, token). The step is
+`continue-on-error`, so a notification failure never fails the release.
 
-- **Add the consumer** to the `CONSUMERS` env list in
-  `.github/workflows/release.yml` (one `owner/repo` per line). On the next
-  release the final step opens a
-  `chore(deps): bump lib-python-harness to vX.Y.Z` issue in every listed repo.
-  The step is idempotent (skips if an open issue with that exact title
-  already exists) and `continue-on-error` (a notification failure never
-  fails the release — it just annotates which consumer/token broke).
-- **Human prerequisite — `CONSUMER_TICKET_TOKEN`:** a repository secret
-  (Settings → Secrets → Actions) holding a fine-grained or classic PAT with
-  **Issues: write** on every consumer repo in `CONSUMERS`. `GITHUB_TOKEN`
-  cannot open cross-repo issues, so without this secret the step is a no-op.
-  Creating/rotating it is a human task, done once before the first release
-  that has consumers.
-- **If the automatic step was skipped or failed** (missing token, or a
-  consumer added after a release), re-file manually: Actions →
-  `open-dep-ticket` (`.github/workflows/ticket.yml`) → "Run workflow",
-  supplying `version` (semver, no leading `v`) and `consumers` (one
-  `owner/repo` per line). It reuses the same idempotency check, so running
-  it twice is safe.
+- **Consumer list:** the `consumers:` input of that step in `release.yml`
+  (one `owner/repo` per line). Add a line when a repo starts pinning this lib.
+- **Human prerequisite — `ECOSYSTEM_TOKEN`:** a repository secret (Settings ->
+  Secrets -> Actions) holding a classic PAT with `repo` and `project` scope.
+  Without it the step is a red-annotated no-op. Creating/rotating it is a
+  human task.
+- **Catch-up:** if a notification was skipped or failed, re-file it with the
+  `open-dep-ticket` workflow in the meta-repo.

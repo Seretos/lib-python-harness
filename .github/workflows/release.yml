@@ -30,13 +30,12 @@ name: release
 # No MARKETPLACE_DISPATCH_TOKEN: a lib never dispatches into the
 # marketplace. The publish steps use only the built-in secrets.GITHUB_TOKEN.
 #
-# Downstream notification: the final step opens a "bump me" ticket in every
-# repo that pins this lib, so a consumer agent picks the update up. That step
-# needs a CONSUMER_TICKET_TOKEN secret (a PAT with Issues: write on the
-# consumer repos) — GITHUB_TOKEN cannot open issues cross-repo. A fresh lib
-# has no consumers, so the step ships as a no-op until you fill in CONSUMERS.
-# See AGENTS.md "Downstream dependency notifications" and the recovery
-# workflow ticket.yml.
+# Downstream notification: the final step calls the central notify-consumers
+# action (Seretos/agent-plugin-dev), which opens a "bump me" ticket in every
+# consumer listed in its `consumers:` input. It needs the ECOSYSTEM_TOKEN
+# secret. Catch-up for a missed notification: the meta-repo's
+# `open-dep-ticket` workflow. See AGENTS.md "Downstream dependency
+# notifications".
 on:
   workflow_dispatch:
     inputs:
@@ -137,66 +136,13 @@ jobs:
             $PRE_FLAG
 
       - name: Open dependency-update tickets in consumers
-        # continue-on-error: a missing/invalid CONSUMER_TICKET_TOKEN, or a
-        # broken file in one consumer, must never fail the release itself —
-        # the recovery workflow (ticket.yml) re-files. The step still annotates
-        # a red ::error:: per failed consumer and exits non-zero, so the run
-        # summary shows exactly which consumer/token needs attention.
+        # continue-on-error: a missing/invalid ECOSYSTEM_TOKEN or a broken
+        # consumer must never fail the release itself.
         continue-on-error: true
-        shell: bash
-        # CONSUMERS / TITLE / BODY live in env (not a run-block heredoc): a
-        # heredoc body at column 0 dedents out of the YAML block scalar and
-        # breaks the file. A YAML block scalar holds the markdown verbatim and
-        # ${{ }} still expands; bash just references the variables.
-        env:
-          GH_TOKEN: ${{ secrets.CONSUMER_TICKET_TOKEN }}
-          # One "owner/repo" per consumer that pins this lib (commas or
-          # newlines both work). Leave empty for a lib with no consumers yet —
-          # the loop then runs zero times and the step is a green no-op. Add a
-          # line here when a downstream repo starts depending on this lib.
-          CONSUMERS: |
+        uses: Seretos/agent-plugin-dev/.github/actions/notify-consumers@main
+        with:
+          version: ${{ inputs.version }}
+          source_repo: ${{ github.repository }}
+          consumers: |
             Seretos/agent-harness
-          TITLE: "chore(deps): bump lib-python-harness to v${{ inputs.version }}"
-          BODY: |
-            ## Dependency update
-
-            A new release of **lib-python-harness** has been published: `v${{ inputs.version }}`.
-
-            ### Action required
-
-            1. Update the pin in `pyproject.toml` to:
-               ```
-               lib-python-harness @ git+https://github.com/Seretos/lib-python-harness@v${{ inputs.version }}
-               ```
-            2. Run this project's test suite to confirm nothing broke.
-            3. Commit the bump and open a PR.
-        run: |
-          # Normalize commas to newlines so CONSUMERS accepts either form.
-          NORMALIZED="$(printf '%s\n' "$CONSUMERS" | tr ',' '\n')"
-          failed=0
-          # Loop in the current shell (here-string, not a pipe) so $failed
-          # survives to the final exit.
-          while IFS= read -r RAW; do
-            CONSUMER="$(printf '%s' "$RAW" | xargs)"   # trim surrounding space
-            [ -z "$CONSUMER" ] && continue
-
-            # Idempotency: skip if an open issue with this exact title already
-            # exists. --paginate follows all pages; jq drops pull requests.
-            EXISTING=$(gh api --paginate "repos/${CONSUMER}/issues?state=open&per_page=100" \
-              --jq 'map(select(.pull_request|not)) | .[].title' 2>/dev/null || true)
-            if printf '%s\n' "$EXISTING" | grep -qxF "$TITLE"; then
-              echo "Issue already exists in ${CONSUMER}, skipping."
-              continue
-            fi
-
-            # Attempt with the 'dependencies' label; retry without it if the
-            # consumer repo does not define that label.
-            if gh issue create --repo "$CONSUMER" --title "$TITLE" --body "$BODY" --label dependencies \
-               || gh issue create --repo "$CONSUMER" --title "$TITLE" --body "$BODY"; then
-              echo "Ticket opened in ${CONSUMER}."
-            else
-              echo "::error::Filing in ${CONSUMER} failed (check CONSUMER_TICKET_TOKEN scope for that repo)."
-              failed=1
-            fi
-          done <<< "$NORMALIZED"
-          exit $failed
+          gh_token: ${{ secrets.ECOSYSTEM_TOKEN }}
