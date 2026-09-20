@@ -252,8 +252,9 @@ print(lib_python_harness.__version__)
 The seam a CLI adapter implements: `build_launch_plan(spec, *, session_id,
 run_dir)` turns a `RunSpec` into a `LaunchPlan`, and `parse_events(lines)`
 turns the adapter's own event stream into a `RunResult`. `ClaudeCliProvider`
-and `CodexCliProvider` are the implementations; `RunSpec.provider` selects one
-by name (`"claude"`, the default, or `"codex"`), and `Harness(provider=...)`
+`CodexCliProvider` and `MistralCliProvider` are the implementations;
+`RunSpec.provider` selects one by name (`"claude"`, the default, `"codex"` or
+`"mistral"`), and `Harness(provider=...)`
 registers a custom instance under its own `name`. Each provider carries a
 `name` and the `binary_argv` the harness prepends at spawn time.
 
@@ -382,6 +383,60 @@ to it then fails with "MCP tool call requires approval, but approval policy is
 never" unless `-c mcp_servers.<name>.default_tools_approval_mode="approve"` is
 also passed. That approval-mode override widens what the child may do, so this
 release keeps `mcp_servers` unsupported rather than emit it.
+
+### MistralCliProvider
+
+The `Provider` implementation that drives the Mistral Vibe CLI (`vibe`,
+surveyed against 2.25.4), selected with `RunSpec(provider="mistral")`. Like
+`CodexCliProvider` it supports `Isolation.CLEAN` only; `Isolation.INHERIT`
+raises `UnsupportedByProvider` before anything is spawned.
+
+The CLEAN recipe is `vibe -p --output streaming --enabled-tools
+__harness_no_tools__`, with the prompt on stdin. In `-p` mode `--enabled-tools
+NAME` disables every other tool, so a name that matches nothing switches all
+tools (built-in, MCP and connector tools) off. `vibe` has no `--model` flag:
+`RunSpec.model` is passed as `VIBE_ACTIVE_MODEL` (a config alias such as
+`mistral-medium-3.5`; an unknown alias makes Vibe exit 1, so the run is
+`FAILED`). `--trust` is deliberately omitted: an untrusted workdir makes Vibe
+ignore project config, which is the stronger isolation.
+
+Isolation: `VIBE_HOME` relocates config, `AGENTS.md`, skills, agents, plugins,
+hooks, `.env`, MCP servers and session logs, so each run gets a fresh empty
+private `VIBE_HOME` (deleted by `Harness` when the run ends) and every
+`VIBE_*` variable of the caller is scrubbed. `VIBE_ENABLE_CONNECTORS=false`
+closes the account-side connectors, which a fresh home cannot reach. Auth is
+`MISTRAL_API_KEY`, else the OS keyring (`vibe --setup` stores it there,
+outside `VIBE_HOME`), so `MISTRAL_API_KEY` is preserved and no credential is
+copied. Without a key, `-p` mode prints to stderr and exits 1.
+
+```python
+from lib_python_harness import Harness, Isolation, MistralCliProvider, RunSpec
+
+# provider="mistral" selects MistralCliProvider from the registry; passing an
+# instance to Harness registers it explicitly under its own name.
+harness = Harness(provider=MistralCliProvider())
+result = harness.run(
+    RunSpec(prompt="Reply with exactly OK", isolation=Isolation.CLEAN,
+            model="mistral-medium-3.5", provider="mistral"))
+print(result.text)  # "OK"; needs vibe on PATH + MISTRAL_API_KEY or keyring
+```
+
+Field mapping:
+
+| `RunSpec` field | Mistral behaviour |
+| --- | --- |
+| `prompt` | stdin |
+| `model` | `VIBE_ACTIVE_MODEL` env var |
+| `max_turns` | `--max-turns N` |
+| `cwd` | fresh empty dir (or an empty caller dir) |
+| `description` | silently ignored |
+| `effort`, `json_schema`, `system_prompt`, `permission_mode`, `tools`, `disallowed_tools`, `skills`, `hooks`, `mcp_servers`, `omit_claude_md`, `agent_name`, `setting_sources`, `strict_mcp`, `session_tools`, `memory` | `UnsupportedByProvider` |
+
+`--output streaming` writes one JSON history entry per line; the result text
+is the last completed assistant `message`, `session_id` is its `sessionId`.
+The stream carries no token or cost totals, so `RunResult.usage` is `{}` and
+`cost` is `None`. A stream with no completed assistant message is treated as
+truncated. The events file is read as UTF-8 (Vibe does not ASCII-escape JSON).
 
 ### UnsupportedByProvider
 
@@ -766,10 +821,14 @@ python -m pytest -m requires_claude
 # live tests: needs the installed `codex` CLI + ChatGPT/API auth
 # (model: HARNESS_CODEX_MODEL, default gpt-5.6-luna)
 python -m pytest -m requires_codex -q -s
+
+# live tests: needs the installed `vibe` CLI + Mistral auth
+# (model: HARNESS_MISTRAL_MODEL, default mistral-medium-3.5)
+python -m pytest -m requires_mistral -q -s
 ```
 
-`requires_codex` tests never run in the default suite (`addopts` excludes
-both `requires_claude` and `requires_codex`).
+`requires_codex` and `requires_mistral` tests never run in the default suite
+(`addopts` excludes `requires_claude`, `requires_codex` and `requires_mistral`).
 
 ## Version policy
 

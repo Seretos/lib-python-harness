@@ -1,8 +1,9 @@
 """Provider-independent types: `Isolation`, `RunSpec`, `LaunchPlan`,
 `RunResult`, and the `Provider` protocol every CLI adapter implements.
 
-`ClaudeCliProvider` (`providers.claude_cli`) and `CodexCliProvider`
-(`providers.codex_cli`) are the implementations; `RunSpec.provider` picks one
+`ClaudeCliProvider` (`providers.claude_cli`), `CodexCliProvider`
+(`providers.codex_cli`) and `MistralCliProvider` (`providers.mistral_cli`)
+are the implementations; `RunSpec.provider` picks one
 by name. A `Provider` carries its `name`, the `binary_argv` the harness
 prepends at spawn time, and exactly two responsibilities:
 

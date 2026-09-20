@@ -29,7 +29,7 @@ extra.
 ## Provider selection
 
 `Harness.start()` resolves `RunSpec.provider` (`"claude"` by default,
-`"codex"`) to a provider instance before anything else: an unknown name
+`"codex"`, `"mistral"`) to a provider instance before anything else: an unknown name
 raises `HarnessError`, and a provider that cannot honour a set field raises
 `UnsupportedByProvider` from `build_launch_plan()` — in both cases before any
 record is written, so no run ever reaches `CREATED`. One provider instance
