@@ -219,6 +219,8 @@ def test_start_time_and_identity_are_decidable_without_psutil(tmp_path):
         start_time = _capture_start_time(proc.pid)
         assert start_time is not None
         assert _pid_status(proc.pid, start_time) is True
+        # identity: a different start time for the same live pid is not us
+        assert _pid_status(proc.pid, start_time - 1000.0) is False
 
         proc.wait(timeout=30)  # `proc` (and its handle) stay referenced
         assert _pid_status(proc.pid, start_time) is False

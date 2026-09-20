@@ -23,7 +23,7 @@ from .errors import (
     UnsafeCwdError,
     UnsupportedByProvider,
 )
-from .harness import Harness, run
+from .harness import Harness, RunSummary, run
 from .host.context import HostContext
 from .providers.base import Isolation, LaunchPlan, Provider, RunResult, RunSpec
 from .providers.claude_cli import ClaudeCliProvider
@@ -62,6 +62,7 @@ __all__ = [
     "RunSpec",
     "RunState",
     "RunStore",
+    "RunSummary",
     "UnsafeCwdError",
     "UnsupportedByProvider",
     "__version__",

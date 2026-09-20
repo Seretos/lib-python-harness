@@ -264,6 +264,7 @@ def test_finalize_does_not_overwrite_a_terminal_record(tmp_path):
 
 
 def test_list_runs_sees_runs_started_by_another_process(tmp_path):
+    began = time.time() - 1.0  # tolerate coarse wall-clock granularity
     labelled = _start_and_let_starter_exit(
         tmp_path, "--label", "nightly", "--prompt", PROMPT, fake_args=["--sleep", "1"]
     )
@@ -272,17 +273,22 @@ def test_list_runs_sees_runs_started_by_another_process(tmp_path):
     )
 
     observer = _observer(tmp_path)
-    summaries = {s.run_id: s for s in observer.list_runs()}
+    listed = observer.list_runs()
+    assert [s.run_id for s in listed] == [labelled, plain], "sorted oldest first"
+    summaries = {s.run_id: s for s in listed}
 
     assert set(summaries) == {labelled, plain}
     assert summaries[labelled].label == "nightly"
     assert summaries[plain].label is None
-    for s in summaries.values():
+    for run_id, s in summaries.items():
+        stored = json.loads((tmp_path / run_id / "record.json").read_text())
         assert isinstance(s.state, RunState)
-        assert s.model == "haiku"
-        assert s.cwd
-        assert isinstance(s.created_at, float) and s.created_at > 0
-    assert summaries[labelled].created_at <= summaries[plain].created_at
+        # values come from the foreign record, not from a placeholder/clock
+        assert s.model == stored["model"] == "haiku"
+        assert s.cwd == Path(stored["cwd"])
+        assert s.created_at == stored["created_at"]
+        assert began <= s.created_at <= time.time()
+    assert summaries[labelled].created_at < summaries[plain].created_at
 
     for run_id in (labelled, plain):
         raw = (tmp_path / run_id / "record.json").read_text()
@@ -364,6 +370,32 @@ def test_poll_does_not_count_a_torn_trailing_line(tmp_path):
 
     assert result.state is RunState.RUNNING
     assert result.event_count == 2
+
+
+def test_poll_last_event_at_is_the_events_file_mtime_not_the_poll_time(tmp_path):
+    events = tmp_path / "events.jsonl"
+    events.write_bytes((_INIT + "\n").encode())
+    old = time.time() - 3600
+    os.utime(events, (old, old))
+    store = InMemoryRunStore()
+    pid = os.getpid()
+    store.put(
+        "live",
+        {
+            "run_id": "live",
+            "state": RunState.RUNNING,
+            "events_path": events,
+            "run_dir": tmp_path,
+            "provider": "claude",
+            "pid": pid,
+            "start_time": _capture_start_time(pid),
+            "created_at": time.time(),
+        },
+    )
+
+    result = Harness(store=store).poll("live")
+
+    assert result.last_event_at == pytest.approx(old, abs=2.0)
 
 
 # -- R9 ----------------------------------------------------------------------
