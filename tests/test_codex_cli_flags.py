@@ -65,6 +65,9 @@ def test_argv_contains_canonical_clean_set(tmp_path):
     assert argv[0] == "exec"
     assert _value_after(argv, "-s") == "read-only"
     assert _value_after(argv, "-m") == "gpt-5.6-luna"
+    # the value comes from spec.model, not a constant
+    other = f"other-model-{uuid.uuid4().hex[:6]}"
+    assert _value_after(_plan(tmp_path, model=other).argv, "-m") == other
 
 
 def test_argv_has_no_claude_flags_and_no_binary(tmp_path):

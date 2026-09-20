@@ -39,7 +39,9 @@ def test_success_stream_maps_all_envelope_fields():
 def test_failed_turn_is_an_error_envelope():
     result = CodexCliProvider().parse_events(_lines("codex_events_failed.jsonl"))
     assert result.is_error is True
-    assert result.subtype  # non-empty reason for the failure
+    assert result.subtype == "turn.failed"  # terminal event type of the recorded failed stream
+    ok = CodexCliProvider().parse_events(_lines("codex_events_sample.jsonl"))
+    assert ok.subtype != "turn.failed"  # a successful turn does not carry the failure subtype
     assert result.text == ""  # a failed turn produced no agent message
 
 
@@ -58,7 +60,9 @@ def test_last_agent_message_wins():
     lines = _lines("codex_events_sample.jsonl")
     extra = json.dumps({"type": "item.completed",
                         "item": {"id": "item_9", "type": "agent_message", "text": "LAST"}})
-    lines = lines[:2] + [extra] + lines[2:-1] + [extra] + lines[-1:]
+    # the sample already holds the "OK" message; LAST comes strictly after it,
+    # so first-wins ("OK") and last-wins ("LAST") differ
+    lines = lines[:-1] + [extra] + lines[-1:]
     assert CodexCliProvider().parse_events(lines).text == "LAST"
 
 
@@ -77,3 +81,10 @@ def test_schema_stream_yields_structured_output_when_requested(tmp_path):
     result = provider.parse_events(_lines("codex_events_schema.jsonl"))
     assert result.structured_output == {"answer": "OK"}
     assert result.text == '{"answer":"OK"}'
+
+
+def test_valid_json_text_is_not_structured_output_when_no_schema_requested():
+    # Same stream, but this provider never built a plan with a json_schema.
+    result = CodexCliProvider().parse_events(_lines("codex_events_schema.jsonl"))
+    assert result.text == '{"answer":"OK"}'
+    assert result.structured_output is None

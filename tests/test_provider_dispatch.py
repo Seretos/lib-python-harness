@@ -77,8 +77,16 @@ def test_provider_codex_spawns_codex_exec_not_claude(tmp_path):
 
 
 def test_default_provider_is_still_claude(tmp_path):
+    # RunSpec's own default, without passing provider at all
+    assert RunSpec(prompt="p", isolation=Isolation.CLEAN, model="m").provider == "claude"
+
     harness = Harness(claude_argv=[sys.executable, str(FAKE_CLAUDE)])
-    result = harness.run(_spec(tmp_path, provider="claude"))
+    run_cwd = tmp_path / "run-cwd"
+    run_cwd.mkdir()
+    result = harness.run(RunSpec(  # provider deliberately omitted
+        prompt="Reply with exactly OK", isolation=Isolation.CLEAN, model="gpt-5.6-luna",
+        cwd=run_cwd, allow_nonempty_cwd=True, artifacts_dir=tmp_path / "artifacts",
+    ))
 
     provenance = _provenance(harness, result.run_id)
     assert "-p" in provenance["flags"]
@@ -87,11 +95,19 @@ def test_default_provider_is_still_claude(tmp_path):
 
 
 def test_explicit_provider_instance_wins_for_its_own_name(tmp_path):
+    calls = []
+
+    class RecordingClaude(ClaudeCliProvider):  # distinguishable from the registry entry
+        def build_launch_plan(self, spec, **kwargs):
+            calls.append(spec)
+            return super().build_launch_plan(spec, **kwargs)
+
     harness = Harness(
-        claude_argv=[sys.executable, str(FAKE_CLAUDE)], provider=ClaudeCliProvider()
+        claude_argv=[sys.executable, str(FAKE_CLAUDE)], provider=RecordingClaude()
     )
     result = harness.run(_spec(tmp_path, provider="claude"))
     assert _provenance(harness, result.run_id)["provider"] == "claude"
+    assert len(calls) == 1, "the injected instance was not the one used"
 
 
 def test_unknown_provider_raises_harness_error_naming_known_providers(tmp_path):
@@ -133,14 +149,18 @@ def test_stop_cancels_running_codex_child(tmp_path):
     time.sleep(0.5)
     assert proc.poll() is None, "fake_codex --sleep must keep the child alive"
 
+    gone_after_stop = False
     try:
         result = harness.stop(started.run_id)
+        # observed BEFORE the safety-net kill, which would otherwise make the
+        # pid vanish on its own (notably on Windows)
+        gone_after_stop = _pid_gone(record["pid"])
     finally:
         if proc.poll() is None:  # never leak the sleeping fake if stop() broke
             proc.kill()
 
     assert result.state == RunState.CANCELLED
-    assert _pid_gone(record["pid"])
+    assert gone_after_stop, "recorded pid survived stop()"
 
     events_path = Path(record["events_path"])
     assert events_path.stat().st_size > 0

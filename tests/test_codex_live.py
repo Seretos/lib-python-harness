@@ -125,15 +125,22 @@ def test_stop_cancels_long_codex_run():
     print(f"pid={pid} descendants={sorted(tree)}")
     assert harness._processes[started.run_id].poll() is None, "run ended before stop()"
 
+    # Observe survivors BEFORE any cleanup: the safety-net kill below must never
+    # run ahead of the assertions, or it would itself establish the "tree is
+    # gone" condition being tested.
+    result = None
+    top_alive = True
+    survivors: list = []
     try:
         result = harness.stop(started.run_id)
+        top_alive = _alive(pid)
+        survivors = [p for p in tree if _alive(p)]
     finally:
         for stray in [pid, *tree]:  # never leak a live model run if stop() is broken
-            if _alive(stray):
-                subprocess.run(["taskkill", "/T", "/F", "/PID", str(stray)], capture_output=True) \
-                    if os.name == "nt" else None
+            if _alive(stray) and os.name == "nt":
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(stray)], capture_output=True)
 
     assert result.state == RunState.CANCELLED
-    assert not _alive(pid)
-    assert not [p for p in tree if _alive(p)], "descendant of the codex process survived stop()"
+    assert not top_alive, "spawned codex pid survived stop()"
+    assert not survivors, f"descendants of the codex process survived stop(): {survivors}"
     assert events_path.stat().st_size > 0  # partial stream kept on disk
