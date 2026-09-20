@@ -373,7 +373,7 @@ def test_start_resume_returns_running_before_child_exits(tmp_path):
     assert final.state == RunState.COMPLETED
     assert final.text == "OK"
     assert final.is_error is False
-    assert final.run_id == started.run_id
+    assert final.session_id == origin.session_id
 
 
 def test_start_resume_of_a_resumed_run_has_exactly_one_resume_pair(tmp_path):

@@ -72,7 +72,11 @@ the process, not across processes), and `UnsupportedByProvider` for providers
 that cannot resume (`codex`, `mistral`, a custom provider without
 `build_resume_plan`). The origin's cwd is reused, or a fresh temp directory if
 it is gone (`claude --resume` finds the session from any cwd, measured on
-Claude Code 2.1.278). See `docs/run-lifecycle.md`.
+Claude Code 2.1.278). `start_resume(run_id, prompt)` is the non-blocking
+variant: same validation and errors, but it returns the new run (`RUNNING`)
+as soon as the follow-up child is spawned, instead of waiting for it to end;
+afterwards use `poll` / `wait_for` / `stop` on the new `run_id`. `resume()` is
+exactly `start_resume()` + `wait()`. See `docs/run-lifecycle.md`.
 
 A run can be observed from a process that did not start it (over a shared
 `FileRunStore`). `wait_for(run_id, timeout=None, poll_interval=0.25)` blocks
@@ -109,6 +113,8 @@ harness.cleanup(record.run_id, remove_cwd=False)
 
 follow_up = harness.resume(result.run_id, "Now reply with exactly DONE")
 print(follow_up.session_id == result.session_id)
+pending = harness.start_resume(result.run_id, "Reply with exactly LATER")  # returns at once
+print(pending.state, harness.wait_for(pending.run_id, timeout=60).text)
 ```
 
 ### RunSpec

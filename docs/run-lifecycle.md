@@ -89,6 +89,14 @@ finished run. It is a **new run**, not a transition of the old one: a new
 new run walks the ordinary `CREATED -> RUNNING -> terminal` path, so no edge is
 added to the table above.
 
+`Harness.start_resume(run_id, prompt)` is the **non-blocking** variant: it does
+the same validation and spawn, but returns the new run (`state == RUNNING`,
+new `run_id`, the origin's `session_id`) as soon as the follow-up child is
+started instead of waiting for it to end. `resume()` is exactly
+`start_resume()` followed by `wait()` on the new run. After `start_resume()`
+use `poll` / `wait_for` / `stop` on the new `run_id`. Everything below applies
+to both.
+
 - **Terminal origins only.** `CREATED`/`RUNNING` origins raise `HarnessError`;
   a `CANCELLED` origin resumes mechanically, but only the transcript the CLI
   actually wrote exists, so the answer may rest on a partial turn.
