@@ -44,6 +44,7 @@ EXPECTED_NAMES = {
     "Provider",
     "LaunchPlan",
     "ClaudeCliProvider",
+    "MistralCliProvider",
     "RunStore",
     "InMemoryRunStore",
     "FileRunStore",

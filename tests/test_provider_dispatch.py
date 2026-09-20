@@ -112,12 +112,12 @@ def test_explicit_provider_instance_wins_for_its_own_name(tmp_path):
 
 def test_unknown_provider_raises_harness_error_naming_known_providers(tmp_path):
     harness = Harness(claude_argv=[sys.executable, str(FAKE_CODEX)])
-    spec = _spec(tmp_path, provider="mistral")
+    spec = _spec(tmp_path, provider="gemini")
     with pytest.raises(HarnessError) as excinfo:
         harness.start(spec)
     message = str(excinfo.value)
-    assert "mistral" in message
-    assert "claude" in message and "codex" in message
+    assert "gemini" in message
+    assert "claude" in message and "codex" in message and "mistral" in message
     assert not (tmp_path / "artifacts").exists() or not list((tmp_path / "artifacts").iterdir())
 
 
@@ -238,3 +238,80 @@ def test_scrubbed_codex_home_is_removed_when_spawn_fails(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         harness.start(_spec(tmp_path))
     assert created and not Path(created[0]).exists()
+
+
+# -- mistral (Vibe CLI) ------------------------------------------------------
+
+FAKE_MISTRAL = FIXTURES / "fake_mistral.py"
+RECORDED_MISTRAL_SESSION_ID = json.loads(
+    (FIXTURES / "mistral_events_sample.jsonl").read_text(encoding="utf-8").splitlines()[0]
+)["sessionId"]
+
+
+def _mistral_spec(tmp_path, **overrides):
+    return _spec(tmp_path, provider="mistral", model="mistral-medium-3.5", **overrides)
+
+
+def test_provider_mistral_spawns_vibe_headless(tmp_path):
+    """R1 driving test."""
+    harness = Harness(claude_argv=[sys.executable, str(FAKE_MISTRAL)])
+    result = harness.run(_mistral_spec(tmp_path))
+
+    provenance = _provenance(harness, result.run_id)
+    flags = provenance["flags"]
+    assert "-p" in flags and "--output" in flags and "streaming" in flags
+    assert flags[flags.index("--output") + 1] == "streaming"
+    assert "--enabled-tools" in flags
+    assert "exec" not in flags and "--json" not in flags
+    assert not (CLAUDE_ONLY_TOKENS - {"-p"}) & set(flags), flags
+    assert "Reply with exactly OK" not in flags  # prompt travels on stdin
+    assert provenance["provider"] == "mistral"
+    assert provenance["cli_version"] == "2.25.4"
+
+    assert result.state == RunState.COMPLETED
+    assert result.text == "OK"
+    assert result.session_id == RECORDED_MISTRAL_SESSION_ID
+
+
+def test_stop_cancels_running_mistral_child(tmp_path):
+    """R5 offline half."""
+    harness = Harness(
+        store=InMemoryRunStore(),
+        claude_argv=[sys.executable, str(FAKE_MISTRAL), "--sleep", "30"],
+    )
+    started = harness.start(_mistral_spec(tmp_path))
+    record = harness.store.get(started.run_id)
+    proc = harness._processes[started.run_id]
+    home = Path(record["cleanup_paths"][0])
+
+    time.sleep(0.5)
+    assert proc.poll() is None, "fake_mistral --sleep must keep the child alive"
+
+    gone_after_stop = False
+    try:
+        result = harness.stop(started.run_id)
+        gone_after_stop = _pid_gone(record["pid"])
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+    assert result.state == RunState.CANCELLED
+    assert gone_after_stop, "recorded pid survived stop()"
+    assert Path(record["events_path"]).stat().st_size > 0
+    assert _provenance(harness, started.run_id)["provider"] == "mistral"
+    assert not home.exists(), "temp VIBE_HOME survived stop()"
+
+    from lib_python_harness.errors import IllegalTransitionError
+
+    with pytest.raises(IllegalTransitionError):
+        harness.stop(started.run_id)
+
+
+def test_temp_vibe_home_is_removed_after_run_completes(tmp_path):
+    harness = Harness(claude_argv=[sys.executable, str(FAKE_MISTRAL)])
+    started = harness.start(_mistral_spec(tmp_path))
+    home = Path(harness.store.get(started.run_id)["cleanup_paths"][0])
+    assert home.is_dir()
+    result = harness.wait(started.run_id, timeout=60)
+    assert result.state == RunState.COMPLETED
+    assert not home.exists()
