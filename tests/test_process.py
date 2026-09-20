@@ -117,7 +117,7 @@ def test_pid_status_reports_mismatched_identity_as_not_alive(tmp_path):
 def _tasklist_alive(pid: int) -> bool:
     out = subprocess.run(
         ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, errors="replace",
     ).stdout
     return f'"{pid}"' in out
 

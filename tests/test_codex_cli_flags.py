@@ -10,6 +10,7 @@ ticket, re-checked against `codex exec --help` (see .adev/4-1/codex-survey.md);
 from __future__ import annotations
 
 import json
+import shutil
 import re
 import sys
 import uuid
@@ -28,6 +29,26 @@ EXPECTED_BARE_FLAGS = [
     "exec", "--json", "--ephemeral", "--ignore-user-config", "--ignore-rules",
     "--skip-git-repo-check",
 ]
+
+
+@pytest.fixture(autouse=True)
+def _reap_scrubbed_homes(monkeypatch):
+    """Direct build_launch_plan callers own the plan's cleanup_paths (Harness
+    does it in real runs); remove them so tests leave no temp dirs behind."""
+    import lib_python_harness.providers.codex_cli as mod
+
+    made = []
+    real = mod.make_scrubbed_codex_home
+
+    def tracked():
+        home = real()
+        made.append(home)
+        return home
+
+    monkeypatch.setattr(mod, "make_scrubbed_codex_home", tracked)
+    yield
+    for home in made:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def _plan(tmp_path, **overrides):
@@ -102,13 +123,42 @@ def test_json_schema_is_written_and_passed_via_output_schema(tmp_path):
 
 
 def test_openai_env_is_scrubbed_and_codex_home_survives(tmp_path, monkeypatch):
+    """Contract (ticket #4 decision): OPENAI_* scrubbed; CODEX_HOME is present
+    but points at a per-run scrubbed dir holding auth.json only -- never the
+    caller's real home (whose AGENTS.md/config the child would otherwise read)."""
     for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORGANIZATION"):
         monkeypatch.setenv(name, f"nonce-{uuid.uuid4().hex}")
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
-    env = _plan(tmp_path).env
+    real = tmp_path / "codex-home"
+    real.mkdir()
+    (real / "auth.json").write_text('{"tok": "secret"}')
+    (real / "AGENTS.md").write_text("PWNED")
+    (real / "config.toml").write_text("developer_instructions='x'")
+    monkeypatch.setenv("CODEX_HOME", str(real))
+    plan = _plan(tmp_path)
+    env = plan.env
     for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORGANIZATION"):
         assert name not in env
-    assert env["CODEX_HOME"] == str(tmp_path / "codex-home")
+    home = Path(env["CODEX_HOME"])
+    try:
+        assert home != real
+        assert sorted(p.name for p in home.iterdir()) == ["auth.json"]
+        assert (home / "auth.json").read_text() == '{"tok": "secret"}'
+        assert not str(home).startswith(str(tmp_path / "artifacts"))
+        assert str(home) in plan.cleanup_paths
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_scrubbed_codex_home_without_auth_json_is_empty(tmp_path, monkeypatch):
+    real = tmp_path / "codex-home"
+    real.mkdir()
+    (real / "AGENTS.md").write_text("PWNED")
+    monkeypatch.setenv("CODEX_HOME", str(real))
+    home = Path(_plan(tmp_path).env["CODEX_HOME"])
+    try:
+        assert home != real and list(home.iterdir()) == []
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def test_default_cwd_is_a_fresh_empty_directory(tmp_path):

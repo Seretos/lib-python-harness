@@ -18,11 +18,13 @@ from .errors import (
     IllegalTransitionError,
     RunIdentityUnverifiedError,
     UnsafeCwdError,
+    UnsupportedByProvider,
 )
 from .harness import Harness, run
 from .host.context import HostContext
 from .providers.base import Isolation, LaunchPlan, Provider, RunResult, RunSpec
 from .providers.claude_cli import ClaudeCliProvider
+from .providers.codex_cli import CodexCliProvider
 from .resolve import resolve
 from .runtime.lifecycle import RunState
 from .runtime.store import FileRunStore, InMemoryRunStore, RunStore
@@ -33,6 +35,7 @@ __all__ = [
     "AgentDefinition",
     "ClaudeCliProvider",
     "ClaudeMarkdownSource",
+    "CodexCliProvider",
     "ConfigError",
     "DefinitionSource",
     "FileRunStore",
@@ -52,6 +55,7 @@ __all__ = [
     "RunState",
     "RunStore",
     "UnsafeCwdError",
+    "UnsupportedByProvider",
     "__version__",
     "discover",
     "load_harness_config",

@@ -125,7 +125,7 @@ def _pid_gone(pid: int) -> bool:
     if os.name == "nt":
         out = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, errors="replace",
         ).stdout
         return f'"{pid}"' not in out
     try:
@@ -167,3 +167,74 @@ def test_stop_cancels_running_codex_child(tmp_path):
     provenance = _provenance(harness, started.run_id)
     # it was a codex run that got cancelled, not a claude one
     assert "exec" in provenance["flags"] and provenance["provider"] == "codex"
+
+
+def _provenance_text(harness, run_id):
+    return Path(harness.store.get(run_id)["provenance_path"]).read_text()
+
+
+def _fake_real_home(tmp_path, monkeypatch):
+    real = tmp_path / "real-home"
+    real.mkdir()
+    (real / "auth.json").write_text('{"tok": "SECRET-CREDENTIAL"}')
+    monkeypatch.setenv("CODEX_HOME", str(real))
+
+
+def test_scrubbed_codex_home_is_removed_after_run_completes(tmp_path, monkeypatch):
+    _fake_real_home(tmp_path, monkeypatch)
+    harness = Harness(claude_argv=[sys.executable, str(FAKE_CODEX)])
+    spec = _spec(tmp_path)
+    started = harness.start(spec)
+    record = harness.store.get(started.run_id)
+    home = Path(record["cleanup_paths"][0])
+    assert (home / "auth.json").is_file() and home != tmp_path / "real-home"
+    result = harness.wait(started.run_id, timeout=60)
+    assert result.state == RunState.COMPLETED
+    assert not home.exists()
+    # provenance records the fact, never the credential
+    text = _provenance_text(harness, started.run_id)
+    assert json.loads(text)["scrubbed_home"] is True
+    assert "SECRET-CREDENTIAL" not in text
+    for f in (tmp_path / "artifacts").rglob("*"):
+        if f.is_file():
+            assert "SECRET-CREDENTIAL" not in f.read_text(errors="ignore")
+    assert (tmp_path / "real-home" / "auth.json").is_file()
+
+
+def test_scrubbed_codex_home_is_removed_after_stop(tmp_path, monkeypatch):
+    _fake_real_home(tmp_path, monkeypatch)
+    harness = Harness(claude_argv=[sys.executable, str(FAKE_CODEX), "--sleep", "30"])
+    started = harness.start(_spec(tmp_path))
+    record = harness.store.get(started.run_id)
+    home = Path(record["cleanup_paths"][0])
+    proc = harness._processes[started.run_id]
+    assert home.exists()
+    try:
+        harness.stop(started.run_id)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert not home.exists()
+
+
+def test_scrubbed_codex_home_is_removed_when_spawn_fails(tmp_path, monkeypatch):
+    _fake_real_home(tmp_path, monkeypatch)
+    import lib_python_harness.harness as h
+
+    created = []
+    real_plan = h.CodexCliProvider.build_launch_plan
+
+    def spy(self, *a, **k):
+        plan = real_plan(self, *a, **k)
+        created.extend(plan.cleanup_paths)
+        return plan
+
+    def boom(**kwargs):
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(h.CodexCliProvider, "build_launch_plan", spy)
+    monkeypatch.setattr(h, "_spawn_detached", boom)
+    harness = Harness(claude_argv=[sys.executable, str(FAKE_CODEX)])
+    with pytest.raises(OSError):
+        harness.start(_spec(tmp_path))
+    assert created and not Path(created[0]).exists()

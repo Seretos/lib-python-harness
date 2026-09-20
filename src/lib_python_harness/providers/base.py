@@ -1,8 +1,10 @@
 """Provider-independent types: `Isolation`, `RunSpec`, `LaunchPlan`,
 `RunResult`, and the `Provider` protocol every CLI adapter implements.
 
-`ClaudeCliProvider` (`providers.claude_cli`) is the only implementation this
-ticket ships. A `Provider` has exactly two responsibilities:
+`ClaudeCliProvider` (`providers.claude_cli`) and `CodexCliProvider`
+(`providers.codex_cli`) are the implementations; `RunSpec.provider` picks one
+by name. A `Provider` carries its `name`, the `binary_argv` the harness
+prepends at spawn time, and exactly two responsibilities:
 
 - `build_launch_plan(spec, session_id=..., run_dir=...)` — turn a `RunSpec`
   into an argv/cwd/env/stdin `LaunchPlan`, enforcing whatever isolation
@@ -10,7 +12,7 @@ ticket ships. A `Provider` has exactly two responsibilities:
 - `parse_events(lines)` — turn the provider's own event stream (one JSON
   object per line for `ClaudeCliProvider`) into a `RunResult`.
 
-What a future Codex/Mistral provider is explicitly *not* required to add to
+What a further (e.g. Mistral) provider is explicitly *not* required to add to
 this protocol (named per the plan-critic note that a blanket "anything else
 is open" sentence documents no boundary at all):
 
@@ -116,14 +118,19 @@ class LaunchPlan:
     """The fully-built command line a `Provider` wants spawned.
 
     `argv` never includes the binary itself — `Harness.claude_argv` (default
-    `["claude"]`, overridable for tests/alternate installs) is prepended by
-    the harness at spawn time. The prompt travels on `stdin`, never `argv`.
+    `None`, an override for tests/alternate installs) or else the provider's
+    own `binary_argv` is prepended by the harness at spawn time. The prompt travels on `stdin`, never `argv`.
     """
 
     argv: list[str]
     cwd: str
     env: dict[str, str]
     stdin: str
+    # Paths the provider created for this run alone (e.g. a scrubbed private
+    # home holding a credential copy). `Harness` removes them when the run
+    # reaches a terminal state (completed/failed/cancelled/spawn-failed) and
+    # on `cleanup()`. Never placed under the artifacts dir.
+    cleanup_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -154,12 +161,17 @@ class Provider(Protocol):
     cover.
     """
 
+    name: str
+    binary_argv: list[str]
+
     def build_launch_plan(
         self, spec: RunSpec, *, session_id: str, run_dir: Path
     ) -> LaunchPlan:
         """Build the argv/cwd/env/stdin for `spec`, enforcing `spec.isolation`.
 
-        Raises `UnsafeCwdError` if `spec.cwd` fails the CLEAN cwd recipe.
+        Raises `UnsafeCwdError` if `spec.cwd` fails the CLEAN cwd recipe, and
+        `UnsupportedByProvider` if `spec` sets a field this provider cannot
+        honour (before anything is spawned).
         """
         ...
 

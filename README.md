@@ -252,8 +252,10 @@ print(lib_python_harness.__version__)
 The seam a CLI adapter implements: `build_launch_plan(spec, *, session_id,
 run_dir)` turns a `RunSpec` into a `LaunchPlan`, and `parse_events(lines)`
 turns the adapter's own event stream into a `RunResult`. `ClaudeCliProvider`
-is the only implementation this release ships; `Harness(provider=...)` is
-the documented swap seam for a future adapter.
+and `CodexCliProvider` are the implementations; `RunSpec.provider` selects one
+by name (`"claude"`, the default, or `"codex"`), and `Harness(provider=...)`
+registers a custom instance under its own `name`. Each provider carries a
+`name` and the `binary_argv` the harness prepends at spawn time.
 
 ```python
 from pathlib import Path
@@ -268,8 +270,8 @@ def describe(provider: Provider, spec: RunSpec) -> LaunchPlan:
 ### LaunchPlan
 
 The fully-built command line a `Provider` wants spawned: `argv` (never
-including the binary itself — `Harness.claude_argv` is prepended at spawn
-time), `cwd`, `env`, and `stdin` (the prompt travels on stdin, never argv).
+including the binary itself — `Harness.claude_argv`, else the provider's
+`binary_argv`, is prepended at spawn time), `cwd`, `env`, and `stdin` (the prompt travels on stdin, never argv).
 
 ```python
 from lib_python_harness import LaunchPlan
@@ -298,6 +300,105 @@ plan = provider.build_launch_plan(
     run_dir=Path("/tmp/example-run"),
 )
 print(plan.argv)
+```
+
+### CodexCliProvider
+
+The `Provider` implementation that drives the OpenAI `codex` CLI
+(`codex exec --json`), selected with `RunSpec(provider="codex")` (the default
+is `"claude"`; an unknown name raises `HarnessError` listing the known ones).
+It supports `Isolation.CLEAN` only and emits
+`exec --json --ephemeral --ignore-user-config --ignore-rules
+--skip-git-repo-check -s read-only -c project_doc_max_bytes=0` (the last pair
+is what keeps a planted `AGENTS.md` in the run's cwd from being obeyed), plus `-m <model>`,
+`-c model_reasoning_effort=<effort>` when `effort` is set and
+`--output-schema <run_dir>/output-schema.json` when `json_schema` is set. The
+prompt travels on stdin. `codex` always reads `$CODEX_HOME/AGENTS.md` and no
+flag disables that, so each CLEAN run gets a **scrubbed `CODEX_HOME`**: a
+private per-run temp dir (mode 0700 where the OS supports it, never under the
+artifacts dir) containing only a copy of `auth.json` from the caller's real
+home (`$CODEX_HOME`, else `~/.codex`). `Harness` deletes it when the run
+completes, fails, is cancelled by `stop()`, fails to spawn, or on `cleanup()`
+(via `LaunchPlan.cleanup_paths`). If the real home has no `auth.json` (e.g.
+API-key setups), the scrubbed home is simply empty; `OPENAI_API_KEY` etc. are
+scrubbed too, so such a run has no credential and will fail to authenticate.
+`provenance.json` records `"scrubbed_home": true` only, never paths or
+credential contents. `OPENAI_API_KEY`, `OPENAI_BASE_URL` and
+`OPENAI_ORGANIZATION` are scrubbed. `codex exec` has no
+approval flag (its policy is effectively "never"), so none is emitted. Cost is
+`None` (codex reports tokens, not dollars). `provenance.json` records
+`provider` and `cli_version` (`claude_version` stays as an alias).
+
+The `thread_id` of the stream is reported as `RunResult.session_id`, but a
+CLEAN run is `--ephemeral`: `codex exec resume <thread_id>` fails with "no
+rollout found", so that id is **not resumable**.
+
+```python
+from pathlib import Path
+import uuid
+
+from lib_python_harness import CodexCliProvider, Isolation, RunSpec
+
+provider = CodexCliProvider()
+plan = provider.build_launch_plan(
+    RunSpec(prompt="Reply with exactly OK", isolation=Isolation.CLEAN,
+            model="gpt-5.6-luna", provider="codex"),
+    session_id=str(uuid.uuid4()),
+    run_dir=Path("/tmp/example-run"),
+)
+print(plan.argv)
+```
+
+Use one provider instance per run (`Harness` does): whether a `json_schema`
+was requested — which decides `structured_output` — is remembered from
+`build_launch_plan` when `parse_events` runs.
+
+On native Windows `codex` is an npm `.cmd` shim: the harness resolves it via
+`PATH`/`PATHEXT` and `stop()` kills the whole process tree (`taskkill /T /F`).
+
+**RunSpec field -> Codex flag mapping**
+
+| `RunSpec` field | Codex |
+| --- | --- |
+| `prompt` | stdin |
+| `model` | `-m <model>` |
+| `effort` | `-c model_reasoning_effort=<effort>` |
+| `json_schema` | `--output-schema <run_dir>/output-schema.json` |
+| `cwd` / `allow_nonempty_cwd` | same CLEAN cwd recipe as Claude (spawn cwd) |
+| `isolation=CLEAN` | the flag set above |
+| `isolation=INHERIT` | unsupported: raises `UnsupportedByProvider` |
+| `permission_mode`, `tools`, `disallowed_tools`, `skills`, `max_turns`, `hooks`, `omit_claude_md`, `agent_name`, `setting_sources`, `strict_mcp`, `session_tools`, `memory`, `system_prompt` | unsupported: raise `UnsupportedByProvider` |
+| `mcp_servers` | unsupported: raises `UnsupportedByProvider` (known limitation, see below) |
+| `description` | silently unsupported: ignored, never an error |
+
+**Global instructions.** `codex` unconditionally reads
+`$CODEX_HOME/AGENTS.md`; because the CLEAN run's `CODEX_HOME` is the scrubbed
+per-run dir described above (auth only), the user's own `AGENTS.md`,
+`config.toml`, rules and MCP servers are not reachable.
+
+`mcp_servers` limitation: a live survey showed `-c mcp_servers.<name>.command=...`
+/ `.args=[...]` can register a server under `--ignore-user-config`, but a call
+to it then fails with "MCP tool call requires approval, but approval policy is
+never" unless `-c mcp_servers.<name>.default_tools_approval_mode="approve"` is
+also passed. That approval-mode override widens what the child may do, so this
+release keeps `mcp_servers` unsupported rather than emit it.
+
+### UnsupportedByProvider
+
+A `HarnessError` raised by a provider's `build_launch_plan()` — before
+anything is spawned or recorded — when the `RunSpec` sets a field that
+provider cannot honour. The message names every offending field at once. The
+rule is the same whether the field came from the caller or from
+`.seretos/harness.yml`.
+
+```python
+from lib_python_harness import Isolation, RunSpec, UnsupportedByProvider, run
+
+try:
+    run(RunSpec(prompt="hi", isolation=Isolation.CLEAN, model="gpt-5.6-luna",
+                provider="codex", permission_mode="plan"))
+except UnsupportedByProvider as exc:
+    print(f"codex cannot do that: {exc}")
 ```
 
 ### RunStore
@@ -661,7 +762,14 @@ python -m pytest
 
 # live tests: needs the installed `claude` CLI + subscription auth
 python -m pytest -m requires_claude
+
+# live tests: needs the installed `codex` CLI + ChatGPT/API auth
+# (model: HARNESS_CODEX_MODEL, default gpt-5.6-luna)
+python -m pytest -m requires_codex -q -s
 ```
+
+`requires_codex` tests never run in the default suite (`addopts` excludes
+both `requires_claude` and `requires_codex`).
 
 ## Version policy
 
