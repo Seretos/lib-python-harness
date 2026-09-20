@@ -54,4 +54,7 @@ class FrontmatterError(HarnessError):
 
 
 class ConfigError(HarnessError):
-    """A `.seretos/harness.yml` layer is unreadable or invalid (skeleton)."""
+    """A `.seretos/harness.yml` layer is unreadable or invalid, or a config
+    value cannot be applied (undefined profile, unknown MCP server name, ...).
+    The message names the file (or agent) and the offending key/value.
+    """

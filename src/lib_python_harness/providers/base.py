@@ -98,10 +98,16 @@ class RunSpec:
     agent_name: str | None = None
     description: str | None = None
 
-    # -- config-driven (ticket #3); carriers only, skeleton.
+    # -- config-driven (ticket #3): filled by `config.apply.apply_config`
+    # from `.seretos/harness.yml`; `None` everywhere = today's behaviour.
+    # `setting_sources` replaces `--setting-sources`' value; `strict_mcp`
+    # makes INHERIT emit `--strict-mcp-config`; `memory=False` gives an
+    # INHERIT run a fresh cwd (no project memory) plus `--add-dir` of the
+    # original one; `session_tools` is a top-level `--tools` allowlist.
     setting_sources: list[str] | None = None
     strict_mcp: bool | None = None
     memory: bool | None = None
+    session_tools: str | None = None
 
 
 @dataclass(frozen=True)

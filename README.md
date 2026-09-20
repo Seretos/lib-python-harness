@@ -505,7 +505,7 @@ just through the materialized path or a converted array).
 | `hooks`             | (forces `materialized`)       | `hooks:`                 | dropped at plugin scope                  |
 | `mcpServers`        | (forces `materialized`)       | `mcpServers:`            | dropped at plugin scope; also drives top-level `--mcp-config` when non-empty |
 | `omitClaudeMd`      | top-level `--setting-sources` | `omitClaudeMd:`          | drops `project` from `--setting-sources` (`user,local` instead of `user,project,local`); live-verified — no `--settings instructionFiles` key has any observable effect on CLAUDE.md loading against the real CLI; dropped at plugin scope. Known trade-off: also drops project-level `.claude/settings.json`, since "project" carries both |
-| `memory`, `background`, `color`, `initialPrompt`, `isolation` | not carried | not carried | parsed by the frontmatter reader, silently dropped by `load_agent_definition` — no `RunSpec` field exists for them |
+| `background`, `color`, `initialPrompt`, `isolation`, `memory` | not carried | not carried | parsed by the frontmatter reader, silently dropped by `load_agent_definition` — a *frontmatter* `memory`/`isolation` never reaches the `RunSpec`; both are settable only through a project's `.seretos/harness.yml` (see *Project overrides*) |
 
 ### FrontmatterError
 
@@ -521,6 +521,136 @@ try:
     raise FrontmatterError("frontmatter fence not closed")
 except FrontmatterError as exc:
     print(f"malformed agent definition: {exc}")
+```
+
+## Project overrides (`.seretos/harness.yml`)
+
+A project can retune any discovered agent by qualified name, without
+forking the plugin that ships it. Files are layered `~/.seretos/harness.yml`
+-> outer repos -> the inner repo (inner wins; `harness.yaml` is read too);
+layering and merging come from `lib-python-config`, validation is a strict
+pydantic model (an unknown key is a `ConfigError`, never a silent no-op).
+
+```yaml
+defaults:
+  isolation: inherit            # inherit | clean | <named profile>
+agents:
+  some-plugin:reviewer:
+    provider: claude            # later: codex, mistral, api, lmstudio
+    model: fable                # plugin says opus; here it runs on fable
+    isolation: clean            # nothing inherited, no memories, no user settings
+    permissionMode: dontAsk
+    tools: { remove: [Bash], add: [WebFetch] }
+    mcpServers: { add: [my-extra-mcp], remove: [serena] }   # child gets MCPs the parent lacks
+    canSpawn: false             # the harness dispatch tool is not in this agent's tool set
+  my-project:planner:
+    canSpawn: true              # nesting depth is set by these flags, never by a global limit
+profiles:
+  clean-with-git:               # named isolation profiles between inherit and clean
+    settingSources: []
+    strictMcp: true
+    tools: [Bash, Read, Grep]
+    omitClaudeMd: true
+    memory: false
+```
+
+**Resolution order for one field:** the file's `agents:` entry > the file's
+`defaults:` > the agent definition's frontmatter > the host context. A
+value the file states also overrides `resolve()`'s plugin-scope drop of
+`permissionMode`/`mcpServers`/`omitClaudeMd` (that drop is about a plugin's
+own frontmatter, not project policy). Later layers of the file itself
+replace earlier ones key by key; lists are replaced, never concatenated
+across layers - use `{add, remove}` to compose. An agent that no layer
+mentions and that no `defaults:` key concerns is resolved exactly as
+without a config.
+
+Semantics worth knowing:
+
+- **Lists.** `tools`/`disallowedTools` accept a plain list (replace) or
+  `{add, remove}` (`remove` first, then `add`, no duplicates), applied to
+  **the definition's own list**, never the host's: a definition without
+  `tools:` stays without after `remove: [Bash]`. `mcpServers` takes
+  `{add, remove}` and patches the set `resolve()` chose (the definition's,
+  else `HostContext.mcp_servers`); a bare name in `add` is looked up in the
+  caller-supplied `HostContext.available_mcp_servers`, and a name missing
+  there is a `ConfigError`. The file carries no commands or secrets.
+- **`isolation`.** `inherit`, `clean`, or a profile name from `profiles:`
+  (unknown -> `ConfigError`; a profile from `~/.seretos` is usable from a
+  project). `clean` runs in a fresh temp directory (never the parent's
+  cwd) and carries only what the file states: `model`, `permissionMode`, a
+  `--tools` allowlist and an `--mcp-config` set (its base is empty). A
+  clean child has no `--agents`/`--agent` binding and no
+  `disallowedTools` (its `--tools` allowlist is exact). A named profile is
+  `inherit` plus its fields: `settingSources` -> `--setting-sources`
+  (`[]` emits the flag with an empty operand), `strictMcp`, `tools` ->
+  a top-level `--tools` allowlist, `omitClaudeMd`, and `memory: false`.
+- **`memory: false`** gives the run a fresh empty working directory (auto
+  memory is keyed by cwd, so a directory `claude` has never run in has none
+  to load) and adds the original cwd with `--add-dir`, so the project's
+  files stay reachable. `memory: true` or unset changes nothing.
+- **`canSpawn`** (per agent only; `defaults.canSpawn` is rejected - nesting
+  is opt-in, never a blanket default) defaults to `false`: the dispatch
+  server, named by `HostContext.dispatch_mcp_server_name`, is removed from
+  the child's `--mcp-config`. `true` requires that name to be set and
+  present in `available_mcp_servers`, and adds it. To make "absent from
+  `--mcp-config`" mean "unreachable", every config-driven run emits
+  `--strict-mcp-config`; a profile may opt out with `strictMcp: false`, but
+  `canSpawn: false` is then unenforceable (inherited settings can still
+  reach the server). Consequence: a config-driven run *computes* its MCP set,
+  so the caller must supply `HostContext.mcp_servers` (the parent's active
+  servers) to keep them - `HostContext.complete()` never collects it. With
+  no config at all nothing changes: the unconfigured command line is
+  byte-identical, so `canSpawn` cannot be enforced there.
+- **`provider`** is validated against `claude` only for now.
+
+### HarnessConfig
+
+The validated result of layering every `.seretos/harness.yml`: `defaults`,
+`agents` (qualified name -> override) and `profiles`. Pass it to
+`resolve(definition, context, config=config)`; `config=None` (the default)
+is byte-identical to a build without this feature.
+
+```python
+from lib_python_harness import HarnessConfig, HostContext, discover, resolve
+
+context = HostContext(cwd="/repo")
+config: HarnessConfig | None = None  # from load_harness_config(...)
+for definition in discover(context).values():
+    spec = resolve(definition, context, config=config)
+    print(spec.agent_name, spec.model, spec.isolation)
+```
+
+### load_harness_config
+
+`load_harness_config(cwd, *, home_default=True)` returns the merged
+`HarnessConfig`, or `None` when no `.seretos/harness.yml` exists anywhere
+(an existing but empty file yields an empty config, which changes nothing).
+Each layer is validated on its own first, so an error names the file it came
+from. `home_default=False` ignores `~/.seretos`.
+
+```python
+from lib_python_harness import load_harness_config
+
+config = load_harness_config("/repo")
+if config is not None:
+    print(sorted(config.agents), sorted(config.profiles))
+```
+
+### ConfigError
+
+A `HarnessError` raised for an unreadable or invalid layer (malformed YAML,
+an unknown key such as `modle`, an unsupported `provider`), naming the file,
+the qualified agent (or profile) and the offending key; and by `resolve()`
+for a config value that cannot be applied (undefined profile, `add` of an
+unknown MCP server, `canSpawn: true` without a dispatch server).
+
+```python
+from lib_python_harness import ConfigError, load_harness_config
+
+try:
+    config = load_harness_config("/repo")
+except ConfigError as exc:
+    print(f"bad .seretos/harness.yml: {exc}")
 ```
 
 ## Development

@@ -76,22 +76,22 @@ _INHERIT_ARGV: tuple[str, ...] = (
     "--setting-sources", "user,project,local",
 )
 
-# `omit_claude_md=True`'s real mechanism — live-verified against installed
-# `claude` v2.1.277 by direct A/B testing in a temp git repo with a
-# CLAUDE.md, round 2 of this ticket: CLAUDE.md loading is gated specifically
-# by the "project" entry of `--setting-sources`, not by any `--settings
-# instructionFiles` key (`{"instructionFiles": []}` and
+# Flags whose value slot `_profile_argv` fills per run: one computed value
+# per flag, decided in one place.
+_SETTING_SOURCES_FLAG = "--setting-sources"
+_TOOLS_FLAG = "--tools"
+
+# `omit_claude_md=True`'s real mechanism (see `_profile_argv`) - live-verified
+# against installed `claude` v2.1.277 by direct A/B testing in a temp git
+# repo with a CLAUDE.md, round 2 of ticket #2: CLAUDE.md loading is gated
+# specifically by the "project" entry of `--setting-sources`, not by any
+# `--settings instructionFiles` key (`{"instructionFiles": []}` and
 # `{"instructionFiles": {"mode": "managed-only"}}` were both probed and
-# *neither* suppresses CLAUDE.md — the CLI accepts the flag with no
-# validation error and loads CLAUDE.md anyway). Dropping "project" from
+# *neither* suppresses CLAUDE.md). Dropping "project" from
 # `--setting-sources` (keeping "user" and "local") does suppress it.
 # Known trade-off, not a design choice: this also drops project-level
 # *settings* (`.claude/settings.json`), since "project" is the one source
-# that carries both — the real CLI does not offer a way to suppress
-# CLAUDE.md without also suppressing project settings.
-_INHERIT_ARGV_OMIT_CLAUDE_MD: tuple[str, ...] = (
-    "--setting-sources", "user,local",
-)
+# that carries both.
 
 # One table, one source of truth per isolation profile — replaces having a
 # bare `CLEAN_ARGV_FLAGS` module constant be the *only* fixed-token source,
@@ -257,6 +257,30 @@ def materialize_agent_dir(spec: RunSpec, run_dir: Path | str) -> Path:
     return dest
 
 
+def _profile_argv(spec: RunSpec) -> list[str]:
+    """`ISOLATION_ARGV[spec.isolation]` with this run's own values
+    substituted into the profile's value slots (byte-identical to the fixed
+    tokens when the run sets none):
+
+    - `--setting-sources`: `spec.setting_sources` joined by `,` when set
+      (an empty list -> the flag with an empty operand, as CLEAN does);
+      else `user,local` when `omit_claude_md` (INHERIT only); else the
+      profile default.
+    - `--tools` (CLEAN's slot): `spec.tools` as a `,`-joined allowlist when
+      set, else the profile default (`""`).
+    """
+    tokens = list(ISOLATION_ARGV[spec.isolation])
+    for i, token in enumerate(tokens[:-1]):
+        if token == _SETTING_SOURCES_FLAG:
+            if spec.setting_sources is not None:
+                tokens[i + 1] = ",".join(spec.setting_sources)
+            elif spec.isolation is Isolation.INHERIT and spec.omit_claude_md:
+                tokens[i + 1] = "user,local"
+        elif token == _TOOLS_FLAG and spec.tools is not None:
+            tokens[i + 1] = ",".join(_split_tools(spec.tools) or [])
+    return tokens
+
+
 def _raises_if_git_ancestor(path: Path) -> None:
     resolved = path.resolve()
     for candidate in (resolved, *resolved.parents):
@@ -314,6 +338,11 @@ def _resolve_inherit_cwd(spec: RunSpec) -> Path:
         raise UnsafeCwdError(f"{cwd} does not exist")
     if not cwd.is_dir():
         raise UnsafeCwdError(f"{cwd} is not a directory")
+    if spec.memory is False:
+        # Auto-memory is keyed by cwd: a directory `claude` has never run in
+        # has no memory tree to load. The original cwd stays reachable via
+        # `--add-dir` (see `_build_inherit_plan`).
+        return Path(tempfile.mkdtemp(prefix="lib-python-harness-cwd-"))
     return cwd
 
 
@@ -360,8 +389,17 @@ class ClaudeCliProvider:
         argv: list[str] = ["-p", "--model", spec.model]
         if spec.effort:
             argv += ["--effort", spec.effort]
+        # Both emissions are gated on fields no plain CLEAN caller sets
+        # (they are filled only by a `.seretos/harness.yml` override).
+        if spec.permission_mode:
+            argv += ["--permission-mode", spec.permission_mode]
 
-        argv += list(ISOLATION_ARGV[Isolation.CLEAN])
+        argv += _profile_argv(spec)
+
+        if spec.mcp_servers:
+            # CLEAN always carries --strict-mcp-config, so the named set is
+            # exactly the reachable set.
+            argv += ["--mcp-config", json.dumps({"mcpServers": spec.mcp_servers})]
 
         argv += ["--system-prompt", spec.system_prompt or ""]
         argv += ["--session-id", session_id]
@@ -389,16 +427,14 @@ class ClaudeCliProvider:
         if spec.permission_mode:
             argv += ["--permission-mode", spec.permission_mode]
 
-        if spec.omit_claude_md:
-            # The real, live-verified mechanism (see
-            # _INHERIT_ARGV_OMIT_CLAUDE_MD above): drop "project" from
-            # --setting-sources. No --settings flag is emitted at all — the
-            # instructionFiles key was probed and confirmed to have no
-            # observable effect on the real CLI, so keeping it would be
-            # dead/misleading mechanism.
-            argv += list(_INHERIT_ARGV_OMIT_CLAUDE_MD)
-        else:
-            argv += list(ISOLATION_ARGV[Isolation.INHERIT])
+        argv += _profile_argv(spec)
+        if spec.strict_mcp:
+            # The child's MCP set was computed (config-driven run): without
+            # this, a server absent from --mcp-config would still be
+            # reachable through inherited user/project settings.
+            argv += ["--strict-mcp-config"]
+        if spec.session_tools is not None:
+            argv += ["--tools", spec.session_tools]
         argv += ["--output-format", "stream-json", "--verbose"]
 
         # tools/disallowedTools/maxTurns/skills are the *agent's* scope, not
@@ -423,6 +459,9 @@ class ClaudeCliProvider:
 
         if spec.json_schema is not None:
             argv += ["--json-schema", json.dumps(spec.json_schema)]
+
+        if spec.memory is False:
+            argv += ["--add-dir", str(Path(spec.cwd))]
 
         if spec.agent_name:
             keys = AGENT_JSON_KEYS if accepted_keys is None else set(accepted_keys)

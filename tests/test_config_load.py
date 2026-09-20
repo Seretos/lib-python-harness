@@ -74,6 +74,9 @@ def test_home_only_config_is_found_and_home_default_false_ignores_it(
 def test_empty_file_changes_nothing(tmp_path):
     repo = make_repo(tmp_path, "")
     cfg = load_harness_config(repo, home_default=False)
+    # An existing-but-empty file is an (empty) config, not "no config": this
+    # keeps the comparison below from degenerating into config=None twice.
+    assert cfg is not None
     baseline = resolve(definition(model="opus"), host(repo))
 
     assert resolve(definition(model="opus"), host(repo), config=cfg) == baseline

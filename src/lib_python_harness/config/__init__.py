@@ -1,16 +1,22 @@
-"""Skeleton for ticket #3 (tests phase): signatures only, no behaviour."""
+"""`.seretos/harness.yml` per-agent overrides: schema, loader, applier."""
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from .apply import apply_config
+from .load import load_harness_config
+from .schema import (
+    AgentOverride,
+    DefaultOverrides,
+    HarnessConfig,
+    IsolationProfile,
+    ListPatch,
+)
 
-
-class HarnessConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-def load_harness_config(cwd, *, home_default: bool = True) -> HarnessConfig | None:
-    return None
-
-
-def apply_config(spec, definition, config):
-    return spec
+__all__ = [
+    "AgentOverride",
+    "DefaultOverrides",
+    "HarnessConfig",
+    "IsolationProfile",
+    "ListPatch",
+    "apply_config",
+    "load_harness_config",
+]

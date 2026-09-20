@@ -300,3 +300,15 @@ def test_profile_without_memory_false_keeps_the_parent_cwd(tmp_path):
 
     assert Path(plan.cwd) == repo
     assert str(repo) not in flag_values(plan.argv, "--add-dir")
+
+
+def test_profile_with_memory_true_keeps_the_parent_cwd_and_adds_no_add_dir(tmp_path):
+    repo, plan = _resolved_plan(
+        tmp_path,
+        "profiles:\n  keeps-memory:\n    memory: true\n"
+        "agents:\n  reviewer:\n    isolation: keeps-memory\n",
+        **_PROJECT,
+    )
+
+    assert Path(plan.cwd) == repo
+    assert str(repo) not in flag_values(plan.argv, "--add-dir")

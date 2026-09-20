@@ -32,13 +32,27 @@ dispatched run is asked to do) and `RunSpec.system_prompt` (unused by
 is emitted for INHERIT, see `providers.claude_cli` — but resolved anyway
 per the plan's "body -> system_prompt" mapping, for the day a system-prompt
 carrier is added without needing a second resolve() pass).
+
+`resolve(definition, host_context, config=None)`: with `config` (a loaded
+`.seretos/harness.yml`, see `config.load_harness_config`) the result above is
+then retuned by `config.apply.apply_config`; `config=None` returns it
+untouched.
 """
 from __future__ import annotations
 
 from .providers.base import Isolation, RunSpec
 
 
-def resolve(definition, host_context) -> RunSpec:
+def resolve(definition, host_context, config=None) -> RunSpec:
+    spec = _resolve_base(definition, host_context)
+    if config is None:
+        return spec
+    from .config.apply import apply_config
+
+    return apply_config(spec, definition, config, host_context)
+
+
+def _resolve_base(definition, host_context) -> RunSpec:
     is_plugin = definition.source_scope == "plugin"
 
     model = definition.model or host_context.model
