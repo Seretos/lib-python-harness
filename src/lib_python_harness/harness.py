@@ -34,8 +34,9 @@ from pathlib import Path
 from typing import Any
 
 from .errors import HarnessError, RunIdentityUnverifiedError
-from .providers.base import RunResult, RunSpec
+from .providers.base import Provider, RunResult, RunSpec
 from .providers.claude_cli import ClaudeCliProvider
+from .providers.codex_cli import CodexCliProvider
 from .runtime.lifecycle import RunState, transition
 from .runtime.process import (
     _capture_start_time,
@@ -44,13 +45,21 @@ from .runtime.process import (
     _reap_until_gone,
     _send_graceful_signal,
     _spawn_detached,
+    resolve_executable,
 )
 from .runtime.store import InMemoryRunStore, RunStore
 
 DEFAULT_STOP_TIMEOUT = 10.0
 
 _VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
-_UNSET = object()
+
+# name -> provider class: what `RunSpec.provider` selects. One instance is
+# created per run (a provider may keep per-run state between
+# `build_launch_plan` and `parse_events`).
+PROVIDERS: dict[str, type] = {
+    "claude": ClaudeCliProvider,
+    "codex": CodexCliProvider,
+}
 
 
 class Harness:
@@ -62,14 +71,36 @@ class Harness:
         self,
         store: RunStore | None = None,
         claude_argv: list[str] | None = None,
-        provider: ClaudeCliProvider | None = None,
+        provider: Provider | None = None,
     ) -> None:
         self.store: RunStore = store if store is not None else InMemoryRunStore()
-        self.claude_argv: list[str] = list(claude_argv) if claude_argv is not None else ["claude"]
+        # Override for tests/alternate installs; `None` = the provider's own
+        # `binary_argv`.
+        self.claude_argv: list[str] | None = (
+            list(claude_argv) if claude_argv is not None else None
+        )
+        # An injected instance is registered under its own `.name` and wins
+        # for `spec.provider == provider.name`.
         self.provider = provider if provider is not None else ClaudeCliProvider()
+        self._injected: dict[str, Provider] = (
+            {provider.name: provider} if provider is not None else {}
+        )
+        self._run_providers: dict[str, Provider] = {}
         self._default_artifacts_dir: Path | None = None
         self._processes: dict[str, subprocess.Popen] = {}
-        self._version_cache: str | None | object = _UNSET
+        self._version_cache: dict[tuple[str, ...], str | None] = {}
+
+    def _resolve_provider(self, spec: RunSpec) -> Provider:
+        name = spec.provider
+        if name in self._injected:
+            return self._injected[name]
+        cls = PROVIDERS.get(name)
+        if cls is None:
+            raise HarnessError(
+                f"unknown provider {name!r}; known providers: "
+                + ", ".join(sorted({*PROVIDERS, *self._injected}))
+            )
+        return cls()
 
     # -- artifacts ---------------------------------------------------------
 
@@ -82,12 +113,13 @@ class Harness:
             )
         return self._default_artifacts_dir
 
-    def _claude_version(self) -> str | None:
-        if self._version_cache is _UNSET:
+    def _cli_version(self, binary_argv: list[str]) -> str | None:
+        key = tuple(binary_argv)
+        if key not in self._version_cache:
             text = ""
             try:
                 proc = subprocess.run(
-                    self.claude_argv + ["--version"],
+                    resolve_executable(list(binary_argv)) + ["--version"],
                     capture_output=True,
                     text=True,
                     timeout=15,
@@ -96,19 +128,25 @@ class Harness:
             except (OSError, subprocess.TimeoutExpired):
                 text = ""
             match = _VERSION_RE.search(text)
-            self._version_cache = match.group(0) if match else None
-        return self._version_cache  # type: ignore[return-value]
+            self._version_cache[key] = match.group(0) if match else None
+        return self._version_cache[key]
 
     # -- lifecycle -----------------------------------------------------
 
     def start(self, spec: RunSpec) -> RunResult:
         run_id = str(uuid_module.uuid4())
         session_id = str(uuid_module.uuid4())
+
+        # Provider selection happens first, before any record or artifact is
+        # written: an unknown name raises HarnessError.
+        provider = self._resolve_provider(spec)
         run_dir = self._artifacts_base(spec) / run_id
 
-        # Raises UnsafeCwdError before anything is ever recorded, if spec.cwd
-        # fails the CLEAN recipe.
-        plan = self.provider.build_launch_plan(spec, session_id=session_id, run_dir=run_dir)
+        # Raises UnsafeCwdError / UnsupportedByProvider before anything is
+        # ever recorded, if spec.cwd fails the CLEAN recipe or the provider
+        # cannot honour a field.
+        plan = provider.build_launch_plan(spec, session_id=session_id, run_dir=run_dir)
+        self._run_providers[run_id] = provider
 
         run_dir.mkdir(parents=True, exist_ok=True)
         events_path = run_dir / "events.jsonl"
@@ -129,14 +167,18 @@ class Harness:
                 (spec.system_prompt or "").encode()
             ).hexdigest(),
             "allow_nonempty_cwd": spec.allow_nonempty_cwd,
+            "provider": provider.name,
         }
         self.store.put(run_id, record)
 
-        argv = self.claude_argv + plan.argv
+        binary_argv = list(self.claude_argv or provider.binary_argv)
+        argv = binary_argv + plan.argv
+        record["binary_argv"] = binary_argv
         # Names present in this process's own environment that did not make
         # it into plan.env — what the provider actually scrubbed for this run.
         scrubbed_env = sorted(set(os.environ) - set(plan.env))
         record["argv"] = argv
+        record["cleanup_paths"] = list(plan.cleanup_paths)
         record["scrubbed_env"] = scrubbed_env
         self.store.put(run_id, record)
 
@@ -151,6 +193,7 @@ class Harness:
                 stderr_path=stderr_path,
             )
         except Exception:
+            self._remove_cleanup_paths(record)
             record["state"] = transition(record["state"], RunState.FAILED)
             duration_s = time.monotonic() - started_at
             record["exit_code"] = None
@@ -227,14 +270,21 @@ class Harness:
                     )
                 status = True  # this process still holds the child's Popen
 
+            def still_alive() -> bool:
+                current = _pid_status(pid, start_time)
+                if current is None:  # cannot verify identity (no psutil)
+                    return proc.poll() is None if proc is not None else False
+                return current
+
             if status:
-                _send_graceful_signal(pid)
-                deadline = time.monotonic() + timeout
-                while time.monotonic() < deadline:
-                    if _pid_status(pid, start_time) is not True:
-                        break
-                    time.sleep(0.05)
-                if _pid_status(pid, start_time) is True:
+                delivered = _send_graceful_signal(pid)
+                if delivered:
+                    deadline = time.monotonic() + timeout
+                    while time.monotonic() < deadline:
+                        if not still_alive():
+                            break
+                        time.sleep(0.05)
+                if still_alive():
                     _force_kill(pid)
                 _reap_until_gone(pid)
 
@@ -252,8 +302,10 @@ class Harness:
         record["provenance_path"] = self._write_provenance(
             record, exit_code=record.get("exit_code"), duration_s=duration_s
         )
+        self._remove_cleanup_paths(record)
         self.store.put(run_id, record)
         self._processes.pop(run_id, None)
+        self._run_providers.pop(run_id, None)
         return self._record_to_result(record)
 
     def cleanup(self, run_id: str, remove_cwd: bool = False) -> None:
@@ -266,6 +318,8 @@ class Harness:
         """
         record = self._require_record(run_id)
         self._processes.pop(run_id, None)
+        self._run_providers.pop(run_id, None)
+        self._remove_cleanup_paths(record)
         if remove_cwd:
             cwd = record.get("cwd")
             if cwd:
@@ -273,6 +327,13 @@ class Harness:
         self.store.remove(run_id)
 
     # -- internals -----------------------------------------------------
+
+    @staticmethod
+    def _remove_cleanup_paths(record: dict[str, Any]) -> None:
+        """Delete the per-run private paths the provider asked to have
+        removed (e.g. a scrubbed CODEX_HOME). Idempotent, never raises."""
+        for path in record.get("cleanup_paths") or ():
+            shutil.rmtree(path, ignore_errors=True)
 
     def _require_record(self, run_id: str) -> dict[str, Any]:
         record = self.store.get(run_id)
@@ -297,6 +358,7 @@ class Harness:
         three routes compute them differently (a spawned-but-never-ran
         process has no exit code at all, hence `None`, not a missing field).
         """
+        cli_version = self._cli_version(record.get("binary_argv") or ["claude"])
         provenance = {
             "flags": record["argv"],
             "cwd": str(record["cwd"]),
@@ -304,11 +366,16 @@ class Harness:
             "effort": record.get("effort"),
             "prompt_sha256": record.get("prompt_sha256"),
             "system_prompt_sha256": record.get("system_prompt_sha256"),
-            "claude_version": self._claude_version(),
+            "provider": record.get("provider"),
+            "cli_version": cli_version,
+            # alias of `cli_version`, kept for slice-1 consumers
+            "claude_version": cli_version,
             "exit_code": exit_code,
             "duration_s": duration_s,
             "scrubbed_env": record.get("scrubbed_env", []),
             "allow_nonempty_cwd": record.get("allow_nonempty_cwd", False),
+            # the fact only - never the contents/paths of the private home
+            "scrubbed_home": bool(record.get("cleanup_paths")),
             "session_id": record.get("session_id"),
         }
         provenance_path = Path(record["run_dir"]) / "provenance.json"
@@ -327,7 +394,8 @@ class Harness:
         parse_error: Exception | None = None
         parsed: RunResult | None = None
         try:
-            parsed = self.provider.parse_events(lines)
+            provider = self._run_providers.get(run_id, self.provider)
+            parsed = provider.parse_events(lines)
         except Exception as exc:  # missing terminal event => FAILED
             parse_error = exc
 
@@ -338,6 +406,7 @@ class Harness:
             record, exit_code=exit_code, duration_s=duration_s
         )
 
+        self._remove_cleanup_paths(record)
         new_state = RunState.FAILED if (parse_error is not None or exit_code != 0) else RunState.COMPLETED
         record["state"] = transition(record["state"], new_state)
         record["exit_code"] = exit_code
@@ -356,6 +425,7 @@ class Harness:
 
         self.store.put(run_id, record)
         self._processes.pop(run_id, None)
+        self._run_providers.pop(run_id, None)
 
     def _record_to_result(self, record: dict[str, Any]) -> RunResult:
         return RunResult(

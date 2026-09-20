@@ -20,13 +20,13 @@ the isolation profile itself.
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
 from ..errors import UnsafeCwdError
 from .base import Isolation, LaunchPlan, RunResult, RunSpec
+from .isolation import _raises_if_git_ancestor, _resolve_clean_cwd, scrub_env  # noqa: F401
 
 # Explicit, enumerable names this build scrubs from the child's environment —
 # a fixed constant (not a runtime-derived pattern) so a test can plant each
@@ -281,44 +281,10 @@ def _profile_argv(spec: RunSpec) -> list[str]:
     return tokens
 
 
-def _raises_if_git_ancestor(path: Path) -> None:
-    resolved = path.resolve()
-    for candidate in (resolved, *resolved.parents):
-        if (candidate / ".git").exists():
-            raise UnsafeCwdError(
-                f"{path} is inside a git repository ({candidate}); "
-                "Isolation.CLEAN requires an empty temp directory outside any repo"
-            )
-
-
 def _resolve_and_validate_cwd(spec: RunSpec) -> Path:
     if spec.isolation is Isolation.INHERIT:
         return _resolve_inherit_cwd(spec)
     return _resolve_clean_cwd(spec)
-
-
-def _resolve_clean_cwd(spec: RunSpec) -> Path:
-    if spec.cwd is None:
-        # Fresh every call: this is the load-bearing half of the auto-memory
-        # guarantee. A directory `claude` has never run in has no
-        # `<config>/projects/<slug>/memory/` tree to load from — the
-        # guarantee comes from the cwd being new, not from any flag.
-        return Path(tempfile.mkdtemp(prefix="lib-python-harness-cwd-"))
-
-    cwd = Path(spec.cwd)
-    if not cwd.exists():
-        raise UnsafeCwdError(f"{cwd} does not exist")
-    if not cwd.is_dir():
-        raise UnsafeCwdError(f"{cwd} is not a directory")
-
-    _raises_if_git_ancestor(cwd)
-
-    if any(cwd.iterdir()) and not spec.allow_nonempty_cwd:
-        raise UnsafeCwdError(
-            f"{cwd} is not empty; Isolation.CLEAN requires an empty cwd unless "
-            "allow_nonempty_cwd=True is set (the single, provenance-recorded opt-out)"
-        )
-    return cwd
 
 
 def _resolve_inherit_cwd(spec: RunSpec) -> Path:
@@ -347,18 +313,15 @@ def _resolve_inherit_cwd(spec: RunSpec) -> Path:
 
 
 def _scrub_env() -> dict[str, str]:
-    env = dict(os.environ)
-    for name in SCRUBBED_ENV:
-        env.pop(name, None)
-    for name in list(env):
-        if name.startswith(_SCRUBBED_ENV_PREFIX):
-            env.pop(name, None)
-    return env
+    return scrub_env(SCRUBBED_ENV, (_SCRUBBED_ENV_PREFIX,))
 
 
 class ClaudeCliProvider:
     """Builds and parses the `claude` CLI's command line, for either
     isolation profile."""
+
+    name = "claude"
+    binary_argv = ["claude"]
 
     def build_launch_plan(
         self,

@@ -26,6 +26,17 @@ diffs it structurally against `runtime.lifecycle._TRANSITIONS` — the two
 are required to describe exactly the same edge set, nothing missing or
 extra.
 
+## Provider selection
+
+`Harness.start()` resolves `RunSpec.provider` (`"claude"` by default,
+`"codex"`) to a provider instance before anything else: an unknown name
+raises `HarnessError`, and a provider that cannot honour a set field raises
+`UnsupportedByProvider` from `build_launch_plan()` — in both cases before any
+record is written, so no run ever reaches `CREATED`. One provider instance
+serves one run (it may keep per-run state between `build_launch_plan` and
+`parse_events`). On native Windows `stop()` has no graceful signal: it goes
+straight to a whole-tree force kill (`taskkill /T /F`).
+
 ## What causes each edge
 
 - `CREATED -> RUNNING`: `Harness.start()` successfully spawned the child

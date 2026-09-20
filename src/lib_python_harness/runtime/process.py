@@ -1,8 +1,13 @@
 """Process control: spawn, signal, reap. Ported from
 `lib-python-worktree/core/process_lifecycle.py` (`_spawn_detached`,
 `_send_graceful_signal`, `_force_kill`, `_reap_until_gone`, `_wait_or_kill`,
-`_capture_start_time`), copied not imported, POSIX-only per the plan (no
-Windows Job Object / handle-scan machinery).
+`_capture_start_time`), copied not imported. POSIX is the reference
+behaviour; native Windows gets a minimal `os.name == "nt"` branch at each
+point where a POSIX primitive does not exist or is destructive (no Job Object
+/ handle-scan machinery, no new dependency): `shutil.which` for PATHEXT shims
+(the npm `codex.cmd`), `CREATE_NEW_PROCESS_GROUP`, a non-destructive liveness
+check (never `os.kill(pid, 0)` — on Windows that is `TerminateProcess`), and
+`taskkill /T /F` so a shim's grandchild dies with it.
 
 Unlike that reference: stdin carries the run's prompt text (via a backing
 file, never a blocking pipe write — see `_spawn_detached`), and
@@ -19,10 +24,25 @@ process still holds the child's own `Popen` object; otherwise it raises
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import time
 from pathlib import Path
+
+
+_IS_WINDOWS = os.name == "nt"
+
+
+def resolve_executable(argv: list[str]) -> list[str]:
+    """On Windows, resolve `argv[0]` through `PATH` + `PATHEXT` (CreateProcess
+    does not apply `PATHEXT`, so a bare `codex` cannot start the npm
+    `codex.cmd` shim); unchanged elsewhere or when nothing is found."""
+    if _IS_WINDOWS and argv:
+        found = shutil.which(argv[0])
+        if found:
+            return [found, *argv[1:]]
+    return list(argv)
 
 
 def _spawn_detached(
@@ -35,8 +55,9 @@ def _spawn_detached(
     stderr_path: Path,
 ) -> subprocess.Popen:
     """Spawn `argv`, stdin from `stdin_text`, stdout to `events_path`,
-    stderr to `stderr_path`. POSIX `start_new_session=True` so the child
-    survives this process's own controlling terminal/process group.
+    stderr to `stderr_path`. POSIX `start_new_session=True` (Windows:
+    `CREATE_NEW_PROCESS_GROUP`) so the child survives this process's own
+    controlling terminal/process group.
 
     The prompt is written to a small sidecar file and handed to the child
     as a real stdin file object (not a `PIPE` we then write to) — a `PIPE`
@@ -55,6 +76,9 @@ def _spawn_detached(
     kwargs: dict = {}
     if os.name == "posix":
         kwargs["start_new_session"] = True
+    elif _IS_WINDOWS:
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        argv = resolve_executable(argv)
 
     with open(stdin_path, "rb") as stdin_file, open(events_path, "wb") as events_file, open(
         stderr_path, "wb"
@@ -103,6 +127,8 @@ def _capture_start_time(pid: int) -> float | None:
 
 
 def _raw_alive(pid: int) -> bool:
+    if _IS_WINDOWS:
+        return _windows_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -110,6 +136,33 @@ def _raw_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _windows_alive(pid: int) -> bool:
+    """Non-destructive liveness check: `OpenProcess` +
+    `GetExitCodeProcess == STILL_ACTIVE`. Never `os.kill(pid, 0)`."""
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # ERROR_ACCESS_DENIED (5): exists but not queryable -> alive;
+        # anything else (e.g. ERROR_INVALID_PARAMETER 87) -> gone.
+        return ctypes.get_last_error() == 5
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _pid_status(pid: int, expected_start_time: float | None) -> bool | None:
@@ -130,7 +183,11 @@ def _pid_status(pid: int, expected_start_time: float | None) -> bool | None:
 
 
 def _send_graceful_signal(pid: int) -> bool:
-    """SIGTERM. Returns `True` if delivered, `False` if the pid was already gone."""
+    """SIGTERM. Returns `True` if delivered, `False` if the pid was already
+    gone. On Windows there is no graceful signal to a console-less process
+    tree, so it returns `False` and callers go straight to `_force_kill`."""
+    if _IS_WINDOWS:
+        return False
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -139,7 +196,15 @@ def _send_graceful_signal(pid: int) -> bool:
 
 
 def _force_kill(pid: int) -> None:
-    """SIGKILL, swallowing "already gone"."""
+    """SIGKILL, swallowing "already gone". On Windows: `taskkill /T /F`, so
+    the whole tree (an npm shim's grandchild) dies, not just the top pid."""
+    if _IS_WINDOWS:
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(pid)],
+            capture_output=True,
+            check=False,
+        )
+        return
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -153,6 +218,10 @@ def _reap_until_gone(pid: int, timeout: float = 5.0) -> None:
     `ChildProcessError` just means there is nothing left to reap.
     """
     deadline = time.monotonic() + timeout
+    if _IS_WINDOWS:
+        while time.monotonic() < deadline and _raw_alive(pid):
+            time.sleep(0.05)
+        return
     while time.monotonic() < deadline:
         try:
             reaped_pid, _status = os.waitpid(pid, os.WNOHANG)
@@ -165,6 +234,16 @@ def _reap_until_gone(pid: int, timeout: float = 5.0) -> None:
         time.sleep(0.05)
 
 
+def _still_alive(pid: int, expected_start_time: float | None) -> bool:
+    """`_pid_status` collapsed for the kill path: an unverifiable identity
+    (`None`, e.g. Windows without `psutil`) counts as alive while the pid is
+    live, so the force-kill is not silently skipped."""
+    status = _pid_status(pid, expected_start_time)
+    if status is None:
+        return _raw_alive(pid)
+    return status
+
+
 def _wait_or_kill(pid: int, timeout: float, expected_start_time: float | None) -> None:
     """Graceful signal -> bounded wait -> force kill -> reap, identity-checked.
 
@@ -175,15 +254,16 @@ def _wait_or_kill(pid: int, timeout: float, expected_start_time: float | None) -
     if _pid_status(pid, expected_start_time) is False:
         return
 
-    _send_graceful_signal(pid)
+    delivered = _send_graceful_signal(pid)
 
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if _pid_status(pid, expected_start_time) is not True:
-            break
-        time.sleep(0.05)
+    if delivered:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not _still_alive(pid, expected_start_time):
+                break
+            time.sleep(0.05)
 
-    if _pid_status(pid, expected_start_time) is True:
+    if _still_alive(pid, expected_start_time):
         _force_kill(pid)
 
     _reap_until_gone(pid)
