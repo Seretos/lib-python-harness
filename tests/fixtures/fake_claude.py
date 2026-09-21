@@ -35,7 +35,7 @@ def main() -> int:
         return 0
 
     # Drain stdin (the prompt) the same way the real CLI would.
-    sys.stdin.read()
+    stdin_text = sys.stdin.read()
 
     session_id = "00000000-0000-4000-8000-000000000000"
     for i, token in enumerate(argv):
@@ -106,6 +106,10 @@ def main() -> int:
     reply = "OK"
     if "--reply" in argv:
         reply = argv[argv.index("--reply") + 1]
+    # --echo-stdin: reply with the drained stdin text verbatim, so a test can
+    # observe what the child actually received as its user message.
+    if "--echo-stdin" in argv:
+        reply = stdin_text
     events = [
         {
             "type": "assistant",

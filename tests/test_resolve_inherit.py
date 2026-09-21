@@ -455,3 +455,134 @@ def test_clean_argv_is_byte_identical_to_today(tmp_path):
         f"expected contiguous subsequence {expected_isolation_tokens} not "
         f"found, in order, in argv {plan.argv}"
     )
+
+
+# -- #24: optional `task` hand-over ------------------------------------------
+
+_ALL_AGENT_KEYS = {
+    "description", "prompt", "tools", "disallowedTools", "model",
+    "permissionMode", "maxTurns", "skills",
+}
+
+
+def _task_plan(tmp_path, body, *, materialized, task="abc"):
+    # The RunSpec resolve(..., task=task) yields (R1 pins that separately),
+    # built directly so the carrier tests fail at the carrier, not at resolve().
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    (repo / ".git").mkdir(exist_ok=True)
+    spec = RunSpec(
+        prompt=task,
+        system_prompt=body,
+        isolation=Isolation.INHERIT,
+        model="sonnet",
+        agent_name="reviewer",
+        description="Reviews code",
+        cwd=repo,
+        # Same forcing device test_inherit_live.py documents: an MCP server
+        # is a key the --agents payload cannot carry.
+        mcp_servers={"demo": {"command": "x"}} if materialized else None,
+    )
+    plan = ClaudeCliProvider().build_launch_plan(
+        spec,
+        session_id=str(uuid.uuid4()),
+        run_dir=tmp_path / "run",
+        accepted_keys=_ALL_AGENT_KEYS,
+    )
+    return spec, plan
+
+
+def test_task_becomes_prompt_and_body_becomes_system_prompt():
+    from lib_python_harness.resolve import resolve
+
+    spec = resolve(_definition(), _host_context(), task="abc")
+    assert spec.prompt == "abc"
+    assert spec.system_prompt == "Do the review."
+
+
+def test_empty_task_is_a_task_not_unset():
+    from lib_python_harness.resolve import resolve
+
+    spec = resolve(_definition(), _host_context(), task="")
+    assert spec.prompt == ""
+    assert spec.system_prompt == "Do the review."
+
+
+def test_task_payload_carrier_carries_body_not_task(tmp_path):
+    import json
+
+    _spec, plan = _task_plan(tmp_path, "Do the review.", materialized=False)
+    assert "--agents" in plan.argv
+    payload = json.loads(plan.argv[plan.argv.index("--agents") + 1])["reviewer"]
+    assert payload["prompt"] == "Do the review."
+    assert plan.stdin == "abc"
+    assert "Do the review." not in plan.stdin
+
+
+def test_task_materialized_carrier_carries_body_not_task(tmp_path):
+    from lib_python_harness.agents.frontmatter import parse_frontmatter
+
+    _spec, plan = _task_plan(tmp_path, "Do the review.", materialized=True)
+    assert "--agents" not in plan.argv
+    md = tmp_path / "run" / "agents" / ".claude" / "agents" / "reviewer.md"
+    _fields, body = parse_frontmatter(md.read_text())
+    assert body.strip() == "Do the review."
+    assert plan.stdin == "abc"
+    assert "Do the review." not in plan.stdin
+
+
+def test_task_materialized_body_with_fence_marker_survives(tmp_path):
+    from lib_python_harness.agents.frontmatter import parse_frontmatter
+
+    body = "Intro.\n---\nAfter the rule."
+    _task_plan(tmp_path, body, materialized=True)
+    md = tmp_path / "run" / "agents" / ".claude" / "agents" / "reviewer.md"
+    _fields, parsed = parse_frontmatter(md.read_text())
+    assert parsed.strip() == body
+
+
+def test_task_empty_body_yields_empty_agent_body_not_the_task(tmp_path):
+    import json
+
+    _spec, plan = _task_plan(tmp_path, "", materialized=False)
+    payload = json.loads(plan.argv[plan.argv.index("--agents") + 1])["reviewer"]
+    assert payload["prompt"] == ""
+    assert plan.stdin == "abc"
+
+
+def test_resolve_without_task_is_unchanged():
+    import dataclasses
+
+    from lib_python_harness.resolve import resolve
+
+    spec = resolve(
+        _definition(model="sonnet", permission_mode="plan", tools="Read"),
+        _host_context(cwd="/tmp/irrelevant"),
+    )
+    got = dataclasses.asdict(spec)
+    assert got["prompt"] == "Do the review."
+    assert got["system_prompt"] == "Do the review."
+    assert got["isolation"] == Isolation.INHERIT
+    assert got["model"] == "sonnet"
+    assert got["permission_mode"] == "plan"
+    assert got["tools"] == "Read"
+    assert got["agent_name"] == "reviewer"
+    assert got["description"] == "Reviews code"
+    assert got["effort"] == "medium"
+
+
+def test_clean_spec_prompt_stays_stdin_and_system_prompt_flag(tmp_path):
+    repo = tmp_path / "cwd"
+    repo.mkdir()
+    spec = RunSpec(
+        prompt="the user message",
+        isolation=Isolation.CLEAN,
+        model="haiku",
+        system_prompt="the system text",
+        cwd=repo,
+    )
+    plan = ClaudeCliProvider().build_launch_plan(
+        spec, session_id=str(uuid.uuid4()), run_dir=tmp_path / "run"
+    )
+    assert plan.stdin == "the user message"
+    assert plan.argv[plan.argv.index("--system-prompt") + 1] == "the system text"

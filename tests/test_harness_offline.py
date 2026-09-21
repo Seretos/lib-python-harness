@@ -364,3 +364,47 @@ def test_run_with_expired_timeout_detaches(tmp_path):
     final = harness.wait(result.run_id, timeout=30)
     assert final.state == RunState.COMPLETED
     assert final.text == "OK"
+
+
+def _task_harness_and_ctx(tmp_path):
+    from types import SimpleNamespace
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    definition = SimpleNamespace(
+        name="reviewer", qualified_name="reviewer", description="Reviews",
+        body="BODY-MARKER-XYZ", model="sonnet", permission_mode=None,
+        effort=None, tools=None, disallowed_tools=None, skills=None,
+        max_turns=None, hooks=None, mcp_servers=None, omit_claude_md=None,
+        source_scope="project",
+    )
+    context = SimpleNamespace(
+        cwd=repo, model="haiku", permission_mode="default", effort="medium",
+        mcp_servers={},
+    )
+    harness = Harness(
+        store=InMemoryRunStore(),
+        claude_argv=[sys.executable, str(FAKE_CLAUDE), "--echo-stdin"],
+    )
+    return harness, definition, context
+
+
+def test_task_reaches_child_stdin_only(tmp_path):
+    from lib_python_harness.resolve import resolve
+
+    harness, definition, context = _task_harness_and_ctx(tmp_path)
+    result = harness.run(resolve(definition, context, task="abc"))
+
+    assert result.text.strip() == "abc"
+    assert "BODY-MARKER-XYZ" not in result.text
+    argv = harness.store.get(result.run_id)["argv"]
+    assert "BODY-MARKER-XYZ" in json.dumps(argv)
+
+
+def test_without_task_child_stdin_is_the_body(tmp_path):
+    from lib_python_harness.resolve import resolve
+
+    harness, definition, context = _task_harness_and_ctx(tmp_path)
+    result = harness.run(resolve(definition, context))
+    assert result.text.strip() == "BODY-MARKER-XYZ"
