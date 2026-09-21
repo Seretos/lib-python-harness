@@ -11,7 +11,6 @@ _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "assert_live_exec
 
 def _load():
     spec = importlib.util.spec_from_file_location("assert_live_executed", _SCRIPT)
-    assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -44,12 +43,16 @@ INHERIT = "tests/test_inherit_live.py"
 CONFIG = "tests/test_config_live.py"
 
 
-def test_zero_testcases_fails(tmp_path):
+def test_zero_testcases_fails(tmp_path, capsys):
     assert _load().main([_report(tmp_path)]) == 1
+    out = capsys.readouterr()
+    assert "executed=0 skipped=0" in out.out + out.err
 
 
-def test_skipped_testcase_fails(tmp_path):
+def test_skipped_testcase_fails(tmp_path, capsys):
     assert _load().main([_report(tmp_path, _case(CONFIG, "a", skipped=True))]) == 1
+    out = capsys.readouterr()
+    assert "executed=0 skipped=1" in out.out + out.err
 
 
 def test_all_executed_passes(tmp_path):

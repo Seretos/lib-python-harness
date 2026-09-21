@@ -70,6 +70,7 @@ def test_execs_real_bin_with_argv_token_and_stdin(recorder):
 def test_unset_real_bin_exits_127():
     r = _run({"HARNESS_CI_CLAUDE_OAUTH_TOKEN": "t"})
     assert r.returncode == 127
+    assert "HARNESS_CI_CLAUDE_REAL_BIN" in r.stderr
 
 
 def test_non_executable_real_bin_exits_127(tmp_path):
