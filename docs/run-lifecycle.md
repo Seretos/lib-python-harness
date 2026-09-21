@@ -60,15 +60,18 @@ The starter of a run and its observer need not be the same process: with a
 shared `FileRunStore`, a `Harness` that holds no `Popen` can watch the run. No
 new `RunState` and no new edge are added to the table above.
 
-- `Harness.wait_for(run_id, timeout, poll_interval)` polls the record until it
-  is terminal. On timeout it returns the `RUNNING` result with
-  `timed_out=True` and signals nothing; it never calls `stop()`.
+- `Harness.wait(run_id, timeout, poll_interval)` (`wait_for` is the same
+  method) polls the record until it is terminal, in the starter's process or
+  any other. On timeout it returns the `RUNNING` result with `timed_out=True`
+  and signals nothing; it never calls `stop()`. `run()` and `resume()` go
+  through it, so an expired time limit detaches instead of cancelling. Only an
+  explicit `stop()` yields `CANCELLED`.
 - **Orphan reconciliation.** A `RUNNING` record whose recorded `pid` +
   `start_time` no longer names a live process (an unreaped zombie counts as
-  not alive) is finalized by `poll()`, `list_runs()` and `wait_for()` without a
+  not alive) is finalized by `poll()`, `list_runs()` and `wait()` without a
   `Popen`: no exit code is known, so the terminal `result` event alone decides
   `COMPLETED` vs `FAILED` (no such event -> `FAILED`). A trailing half-written
-  `events.jsonl` line is ignored. `wait_for` waits a short grace period after
+  `events.jsonl` line is ignored. `wait` waits a short grace period after
   the process vanished so a `stop()` running in the starter's process is
   reported `CANCELLED`, not `FAILED`. On Windows the start time comes from
   `GetProcessTimes` via `ctypes`; `psutil` is not required.
@@ -77,7 +80,8 @@ new `RunState` and no new edge are added to the table above.
   lock, so this narrows the race rather than closing it.
 - `FileRunStore.put` writes a temp file and `os.replace`s it, so a reader never
   sees a half-written `record.json`.
-- While `RUNNING`, `poll()` reports `event_count` and `last_event_at` from
+- While `RUNNING`, `poll()` and a timed-out `wait()` report `duration_s`,
+  `event_count`, `last_event_at` and `last_activity` from
   `events.jsonl`; `list_runs()` returns `RunSummary` rows.
 
 ## Resume
@@ -94,7 +98,7 @@ the same validation and spawn, but returns the new run (`state == RUNNING`,
 new `run_id`, the origin's `session_id`) as soon as the follow-up child is
 started instead of waiting for it to end. `resume()` is exactly
 `start_resume()` followed by `wait()` on the new run. After `start_resume()`
-use `poll` / `wait_for` / `stop` on the new `run_id`. Everything below applies
+use `poll` / `wait` / `stop` on the new `run_id`. Everything below applies
 to both.
 
 - **Terminal origins only.** `CREATED`/`RUNNING` origins raise `HarnessError`;

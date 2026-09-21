@@ -475,7 +475,7 @@ def test_wait_from_a_second_process_matches_the_starter(tmp_path):
     assert waiter["elapsed"] >= 1.0, "foreign wait returned before the child could finish"
     assert waiter["text"] == starter_result["text"]
     assert waiter["usage"] == starter_result["usage"]
-    assert waiter["usage"]
+    assert waiter["usage"] == {"input_tokens": 10, "output_tokens": 2}  # the fake CLI's own usage
 
 
 def test_wait_on_unknown_run_id_raises_harness_error(tmp_path):
@@ -507,9 +507,10 @@ def test_two_parallel_waiters_do_not_block_each_other(tmp_path):
     assert out_a["state"] == out_b["state"] == "COMPLETED"
     assert out_a["text"] == "A"
     assert out_b["text"] == "B"
-    # Children run concurrently (3 s each); serialised waiting would take >= 6 s
-    # plus interpreter start-up. 5.5 s leaves ample slack for slow CI starts.
-    assert elapsed < 5.5, f"parallel waiters took {elapsed:.1f}s"
+    # Children run concurrently (3 s each). A foreign waiter finalizes a gone
+    # process only after _FINALIZE_GRACE_S (3 s), so one waiter takes ~6.5 s;
+    # serialised waiting would take about twice that (>= 12 s).
+    assert elapsed < 10.0, f"parallel waiters took {elapsed:.1f}s"
 
 
 def test_running_result_carries_liveness_signs(tmp_path):
@@ -565,4 +566,4 @@ def test_running_result_last_activity_is_none_for_an_unrecognizable_stream(tmp_p
 
     assert result.state is RunState.RUNNING
     assert result.last_activity is None
-    assert result.duration_s is not None and result.duration_s >= 5
+    assert result.duration_s is not None and 5 <= result.duration_s < 60

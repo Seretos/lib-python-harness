@@ -108,3 +108,11 @@ def test_describe_last_activity_empty_or_unrecognizable_stream_is_none():
     provider = ClaudeCliProvider()
     assert provider.describe_last_activity([]) is None
     assert provider.describe_last_activity(["", "not json", _line({"type": "mystery"})]) is None
+
+
+def test_describe_last_activity_is_scoped_to_the_newest_event():
+    # A stale tool_use earlier in the stream must not outlive newer events.
+    lines = [_assistant(_TOOL_USE), _assistant(_TEXT)]
+    assert ClaudeCliProvider().describe_last_activity(lines) == "text"
+    result = _line({"type": "user", "message": {"content": [{"type": "tool_result"}]}})
+    assert ClaudeCliProvider().describe_last_activity([_assistant(_TOOL_USE), result]) == "tool_result"
