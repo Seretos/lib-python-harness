@@ -701,6 +701,18 @@ definition-else-context; `tools`/`disallowed_tools`/`skills`/`max_turns`/
 agents, not independently verified). The returned `RunSpec` is ready for
 `run()`.
 
+`resolve(definition, context, config=None, *, task=None)`: `task` is
+keyword-only. Without it the definition's body is both the run's instructions
+and its user message (`prompt == system_prompt == body`). With `task` set,
+`RunSpec.prompt` is the task and the body travels only as the agent's
+system prompt (the `--agents` `prompt` / materialized `.md` body), so one
+definition can be dispatched for varying jobs and the body no longer reaches
+the child twice. `task=""` is a task, not "unset".
+
+```python
+spec = resolve(definition, context, task="Review src/app.py")
+```
+
 ```python
 from lib_python_harness import HostContext, discover, resolve
 
@@ -727,6 +739,7 @@ just through the materialized path or a converted array).
 | Frontmatter field | `payload` carrier            | `materialized` carrier | Notes                                   |
 | ------------------ | ----------------------------- | ----------------------- | ---------------------------------------- |
 | `description`       | `--agents` `description`      | `description:`           | never dropped/defaulted by `resolve()` — the real frontmatter value flows through unchanged; `payload` mode simply omits the JSON key when the definition has none, while `materialized` mode substitutes a synthesized filler in that case (its own loader silently drops a description-less file from discovery, live-verified) |
+| `body` (with `task`) | `--agents` `prompt`           | the file's body          | the definition body always travels here (never on stdin when `task` is given; `task` is the user message on stdin) |
 | `model`             | top-level `--model`           | `model:`                 | `model: inherit` passes through literally |
 | `permissionMode`    | top-level `--permission-mode` | `permissionMode:`        | dropped at plugin scope                  |
 | `effort`            | top-level `--effort`          | (not carried)            | definition-else-context                  |
@@ -893,6 +906,8 @@ python -m pytest
 
 # live tests: needs the installed `claude` CLI + subscription auth
 python -m pytest -m requires_claude
+# only the task hand-over probe (`resolve(..., task="abc")` must reply `cba`)
+python -m pytest -m requires_claude -k task -q -s
 
 # live tests: needs the installed `codex` CLI + ChatGPT/API auth
 # (model: HARNESS_CODEX_MODEL, default gpt-5.6-luna)

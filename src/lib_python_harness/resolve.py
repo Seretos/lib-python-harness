@@ -25,15 +25,16 @@ empty/missing frontmatter description normalizes to `None` here, so the
 `payload`/`materialized` carriers can each apply their own fallback
 (omit the JSON key; synthesize a dispatchable filler) uniformly.
 
-The agent's own body becomes both `RunSpec.prompt` (there is no separate
-"task" argument to `resolve()` — the definition's body *is* what the
-dispatched run is asked to do) and `RunSpec.system_prompt` (unused by
-`Isolation.INHERIT` today — no `--system-prompt`/`--append-system-prompt`
-is emitted for INHERIT, see `providers.claude_cli` — but resolved anyway
-per the plan's "body -> system_prompt" mapping, for the day a system-prompt
-carrier is added without needing a second resolve() pass).
+The agent's own body always becomes `RunSpec.system_prompt`. Without a
+`task` it is also `RunSpec.prompt` (the definition's body *is* what the
+dispatched run is asked to do). With the optional keyword-only `task`,
+`RunSpec.prompt` is the task instead, so the child gets the body only as
+its agent instructions (the `--agents` payload / materialized `.md` body,
+see `providers.claude_cli`) and the task only as its user message (stdin);
+`task=""` is a task, not "unset". No `--system-prompt` is emitted for
+INHERIT.
 
-`resolve(definition, host_context, config=None)`: with `config` (a loaded
+`resolve(definition, host_context, config=None, *, task=None)`: with `config` (a loaded
 `.seretos/harness.yml`, see `config.load_harness_config`) the result above is
 then retuned by `config.apply.apply_config`; `config=None` returns it
 untouched.
@@ -43,8 +44,10 @@ from __future__ import annotations
 from .providers.base import Isolation, RunSpec
 
 
-def resolve(definition, host_context, config=None) -> RunSpec:
-    spec = _resolve_base(definition, host_context)
+def resolve(
+    definition, host_context, config=None, *, task: str | None = None
+) -> RunSpec:
+    spec = _resolve_base(definition, host_context, task)
     if config is None:
         return spec
     from .config.apply import apply_config
@@ -52,7 +55,7 @@ def resolve(definition, host_context, config=None) -> RunSpec:
     return apply_config(spec, definition, config, host_context)
 
 
-def _resolve_base(definition, host_context) -> RunSpec:
+def _resolve_base(definition, host_context, task: str | None = None) -> RunSpec:
     is_plugin = definition.source_scope == "plugin"
 
     model = definition.model or host_context.model
@@ -74,7 +77,7 @@ def _resolve_base(definition, host_context) -> RunSpec:
         omit_claude_md = definition.omit_claude_md
 
     return RunSpec(
-        prompt=definition.body,
+        prompt=task if task is not None else definition.body,
         isolation=Isolation.INHERIT,
         model=model,
         effort=effort,
