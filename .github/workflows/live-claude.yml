@@ -6,6 +6,19 @@ name: live-claude
 # continue-on-error and no secret-conditional `if:`.
 on:
   pull_request:
+    # Live runs draw on the subscription quota behind the token, so skip PRs
+    # that touch neither code, tests, CI scripts nor this workflow.
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "scripts/**"
+      - "pyproject.toml"
+      - ".github/workflows/live-claude.yml"
+
+# A newer push to the same PR supersedes the still-running live job.
+concurrency:
+  group: live-claude-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

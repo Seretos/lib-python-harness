@@ -905,7 +905,8 @@ python -m pytest -m requires_mistral -q -s
 
 The PR-only workflow `.github/workflows/live-claude.yml` runs the
 `requires_claude` suite against a real `claude` CLI, so those tests are
-executed on every PR rather than deselected. It reads the repository secret
+executed on PRs that touch `src/`, `tests/`, `scripts/`, `pyproject.toml` or the
+workflow itself (a newer push cancels the running job), rather than deselected. It reads the repository secret
 `CLAUDE_CODE_OAUTH_TOKEN` (a `claude setup-token` string). If that secret is
 missing the job fails loudly with an `::error::` line; it never skips. After
 pytest, `scripts/assert_live_executed.py` checks that the junit report shows
