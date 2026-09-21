@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -52,14 +53,16 @@ _REPLACE_RETRY_S = 1.0
 
 
 def _read_json(path: Path) -> dict[str, Any]:
-    """Read a record file, retrying briefly on `PermissionError`: on Windows
+    """Read a record file, retrying briefly on `PermissionError` (on Windows
     opening a file that a concurrent `put()` is replacing fails with a
-    sharing violation."""
+    sharing violation) and on `json.JSONDecodeError` (a momentarily
+    unparseable file); a persistently bad file raises once the deadline
+    passes."""
     deadline = time.monotonic() + _REPLACE_RETRY_S
     while True:
         try:
             return json.loads(path.read_text())
-        except PermissionError:
+        except (PermissionError, json.JSONDecodeError):
             if time.monotonic() >= deadline:
                 raise
             time.sleep(0.005)
@@ -115,7 +118,7 @@ class FileRunStore:
         # Atomic: write a sibling temp file, then replace. On Windows the
         # replace can fail with a sharing violation while another process has
         # the destination open, so retry briefly rather than raise.
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
         tmp.write_text(payload)
         deadline = time.monotonic() + _REPLACE_RETRY_S
         try:
