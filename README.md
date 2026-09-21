@@ -75,21 +75,26 @@ it is gone (`claude --resume` finds the session from any cwd, measured on
 Claude Code 2.1.278). `start_resume(run_id, prompt)` is the non-blocking
 variant: same validation and errors, but it returns the new run (`RUNNING`)
 as soon as the follow-up child is spawned, instead of waiting for it to end;
-afterwards use `poll` / `wait_for` / `stop` on the new `run_id`. `resume()` is
+afterwards use `poll` / `wait` / `stop` on the new `run_id`. `resume()` is
 exactly `start_resume()` + `wait()`. See `docs/run-lifecycle.md`.
 
-A run can be observed from a process that did not start it (over a shared
-`FileRunStore`). `wait_for(run_id, timeout=None, poll_interval=0.25)` blocks
-until the run is terminal and returns its result; unlike `wait()`, an expired
-timeout **never cancels** the run — it returns the `RUNNING` result with
-`timed_out=True`. A run whose process vanished without being finalized is
-finalized by the observer (no exit code is known then, so the terminal
-`result` event alone decides `COMPLETED` vs `FAILED`; a `stop()` in the
-starter's process is still reported `CANCELLED`). `list_runs()` returns a
-`RunSummary` per stored run, oldest first, reconciling orphaned `RUNNING`
-records the same way `poll()` does. While a run is `RUNNING`, `poll()` also
-reports `event_count` and `last_event_at` (see `RunResult`). Both raise
-`HarnessError` for an unknown `run_id` (`wait_for`). See
+A time limit ends the *waiting*, never the run. `wait(run_id, timeout=None,
+poll_interval=0.25)` blocks until the run is terminal and returns its result,
+whichever process started it (over a shared `FileRunStore` a freshly started
+process can wait a foreign run and gets the same `text`/`usage` as the
+starter); `wait_for` is the same method under its older name. An expired
+`timeout` returns the still-`RUNNING` result with `timed_out=True` and signals
+nothing: continue with `wait(run_id)`. `run()` and `resume()` behave the same
+way — on an expired `timeout` they detach (`RUNNING`, `timed_out=True`, child
+alive) instead of killing the run. Only an explicit `stop()` yields
+`CANCELLED`. A run whose process vanished without being finalized is finalized
+by the observer (no exit code is known then, so the terminal `result` event
+alone decides `COMPLETED` vs `FAILED`; a `stop()` in the starter's process is
+still reported `CANCELLED`). `list_runs()` returns a `RunSummary` per stored
+run, oldest first, reconciling orphaned `RUNNING` records the same way `poll()`
+does. While a run is `RUNNING`, `poll()` and a timed-out `wait()` also report
+`duration_s`, `event_count`, `last_event_at` and `last_activity` (see
+`RunResult`). `wait` raises `HarnessError` for an unknown `run_id`. See
 `docs/run-lifecycle.md`.
 
 ```python
@@ -106,7 +111,7 @@ record = harness.start(
             isolation=Isolation.CLEAN, model="haiku")
 )
 harness.poll(record.run_id)
-observed = harness.wait_for(record.run_id, timeout=5.0)  # never cancels
+observed = harness.wait(record.run_id, timeout=5.0)  # never cancels
 print(observed.timed_out, [s.label for s in harness.list_runs()])
 harness.stop(record.run_id, timeout=10.0)
 harness.cleanup(record.run_id, remove_cwd=False)
@@ -114,7 +119,7 @@ harness.cleanup(record.run_id, remove_cwd=False)
 follow_up = harness.resume(result.run_id, "Now reply with exactly DONE")
 print(follow_up.session_id == result.session_id)
 pending = harness.start_resume(result.run_id, "Reply with exactly LATER")  # returns at once
-print(pending.state, harness.wait_for(pending.run_id, timeout=60).text)
+print(pending.state, harness.wait(pending.run_id, timeout=60).text)
 ```
 
 ### RunSpec
@@ -152,12 +157,17 @@ Content fields (`text`, `is_error`, `subtype`, `structured_output`, `usage`,
 `cost`) come from the CLI's own terminal `result` event; `session_id`,
 `transcript_path`, `state` and `duration_s` are the harness's own
 run-identity/lifecycle bookkeeping, which no single stream event carries.
-`timed_out` is `True` only on a `Harness.wait_for` result whose timeout
-expired while the run kept running (`state` stays `RUNNING`). While `state` is
-`RUNNING`, `event_count` (complete lines in the run's `events.jsonl`) and
-`last_event_at` (that file's modification time, epoch seconds — how long ago
-the run last wrote, i.e. working or hung) show live progress; on a terminal
-result they are `0` / `None`.
+`timed_out` is `True` only on a `Harness.wait`/`wait_for`/`run`/`resume`
+result whose timeout expired while the run kept running (`state` stays
+`RUNNING`; continue with `wait(run_id)` — a time limit never cancels). While
+`state` is `RUNNING`, `duration_s` (seconds since the run was created),
+`event_count` (complete lines in the run's `events.jsonl`), `last_event_at`
+(that file's modification time, epoch seconds — how long ago the run last
+wrote, i.e. working or hung) and `last_activity` (provider-derived label of
+the newest event, e.g. `tool_use:Bash`, `text`, `tool_result`, `init`; `None`
+for providers without one or an unrecognizable stream) show live progress; on
+a terminal result `event_count` / `last_event_at` / `last_activity` are
+`0` / `None` / `None`.
 
 ```python
 from lib_python_harness import Harness, RunSpec, Isolation, RunResult

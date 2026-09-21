@@ -482,6 +482,45 @@ class ClaudeCliProvider:
             run_cwd = tempfile.mkdtemp(prefix="lib-python-harness-cwd-")
         return LaunchPlan(argv=argv, cwd=run_cwd, env=_scrub_env(), stdin=prompt)
 
+    def describe_last_activity(self, lines: Iterable[str]) -> str | None:
+        """Short label for the newest recognizable event of a (possibly
+        still growing) stream: `tool_use:<name>` for the last `tool_use`
+        block of the newest `assistant` event, else `text`, `tool_result` or
+        `init`. Malformed/unknown lines are skipped; `None` when nothing is
+        recognizable. Never raises."""
+        for line in reversed([ln.strip() for ln in lines]):
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            label = self._activity_label(event)
+            if label is not None:
+                return label
+        return None
+
+    @staticmethod
+    def _activity_label(event: Any) -> str | None:
+        if not isinstance(event, dict):
+            return None
+        kind = event.get("type")
+        if kind == "system":
+            return "init" if event.get("subtype") == "init" else None
+        if kind not in ("assistant", "user"):
+            return None
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+        if kind == "assistant":
+            tools = [b for b in blocks if b.get("type") == "tool_use"]
+            if tools:
+                return f"tool_use:{tools[-1].get('name', '?')}"
+            if any(b.get("type") == "text" for b in blocks):
+                return "text"
+            return None
+        return "tool_result" if any(b.get("type") == "tool_result" for b in blocks) else None
+
     def parse_events(self, lines: Iterable[str]) -> RunResult:
         terminal: dict | None = None
         for line in lines:

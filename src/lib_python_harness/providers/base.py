@@ -162,6 +162,7 @@ class RunResult:
     timed_out: bool = False
     event_count: int = 0
     last_event_at: float | None = None
+    last_activity: str | None = None
 
 
 class Provider(Protocol):

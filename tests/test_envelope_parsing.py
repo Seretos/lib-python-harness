@@ -61,3 +61,58 @@ def test_truncated_stream_without_terminal_result_is_a_failure():
     # accepted as a successful result.
     with pytest.raises(Exception):
         ClaudeCliProvider().parse_events(SCENARIOS["truncated_stream"])
+
+
+# -- package 25: describe_last_activity (liveness sign on RUNNING results) ----
+
+
+def _line(obj) -> str:
+    return json.dumps(obj)
+
+
+def _assistant(*blocks) -> str:
+    return _line({"type": "assistant", "message": {"content": list(blocks)}})
+
+
+_INIT_LINE = _line({"type": "system", "subtype": "init", "session_id": "s"})
+_TOOL_USE = {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}
+_TEXT = {"type": "text", "text": "hello"}
+
+
+def test_describe_last_activity_names_the_last_tool_use():
+    lines = [_INIT_LINE, _assistant(_TEXT), _assistant(_TOOL_USE)]
+    assert ClaudeCliProvider().describe_last_activity(lines) == "tool_use:Bash"
+
+
+def test_describe_last_activity_uses_the_last_tool_use_block_of_the_newest_event():
+    other = {"type": "tool_use", "id": "t2", "name": "Read", "input": {}}
+    lines = [_assistant(_TOOL_USE), _assistant(_TEXT, _TOOL_USE, other)]
+    assert ClaudeCliProvider().describe_last_activity(lines) == "tool_use:Read"
+
+
+def test_describe_last_activity_text_only_stream():
+    lines = [_INIT_LINE, _assistant(_TEXT)]
+    assert ClaudeCliProvider().describe_last_activity(lines) == "text"
+
+
+def test_describe_last_activity_init_only_stream():
+    assert ClaudeCliProvider().describe_last_activity([_INIT_LINE]) == "init"
+
+
+def test_describe_last_activity_skips_a_truncated_trailing_line():
+    lines = [_assistant(_TOOL_USE), '{"type": "assist']
+    assert ClaudeCliProvider().describe_last_activity(lines) == "tool_use:Bash"
+
+
+def test_describe_last_activity_empty_or_unrecognizable_stream_is_none():
+    provider = ClaudeCliProvider()
+    assert provider.describe_last_activity([]) is None
+    assert provider.describe_last_activity(["", "not json", _line({"type": "mystery"})]) is None
+
+
+def test_describe_last_activity_is_scoped_to_the_newest_event():
+    # A stale tool_use earlier in the stream must not outlive newer events.
+    lines = [_assistant(_TOOL_USE), _assistant(_TEXT)]
+    assert ClaudeCliProvider().describe_last_activity(lines) == "text"
+    result = _line({"type": "user", "message": {"content": [{"type": "tool_result"}]}})
+    assert ClaudeCliProvider().describe_last_activity([_assistant(_TOOL_USE), result]) == "tool_result"

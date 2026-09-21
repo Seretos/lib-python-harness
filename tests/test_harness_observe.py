@@ -433,3 +433,137 @@ def test_poll_reconciles_an_orphaned_run(tmp_path):
         result = observer.poll(run_id)
 
     assert result.state is RunState.FAILED
+
+
+# -- package 25: wait() is cross-process and never cancels --------------------
+
+WAIT_RUN = FIXTURES / "wait_run.py"
+
+
+def _run_waiter(artifacts, run_id, *extra):
+    return subprocess.Popen(
+        [sys.executable, str(WAIT_RUN), str(artifacts), run_id, *extra],
+        env=_starter_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _waiter_json(proc):
+    out, err = proc.communicate(timeout=60)
+    assert proc.returncode == 0, err
+    return json.loads(out.strip().splitlines()[-1])
+
+
+def test_wait_from_a_second_process_matches_the_starter(tmp_path):
+    starter, run_id = _launch_starter(
+        tmp_path, "--wait", fake_args=["--sleep", "3", "--reply", "SHARED"]
+    )
+    try:
+        waiter = _waiter_json(_run_waiter(tmp_path, run_id))
+        starter_out, starter_err = starter.communicate(timeout=60)
+    finally:
+        if starter.poll() is None:
+            starter.kill()
+    assert starter.returncode == 0, starter_err
+    starter_result = json.loads(starter_out.strip().splitlines()[-1])
+
+    assert waiter["state"] == "COMPLETED"
+    assert waiter["text"] == "SHARED"
+    assert waiter["timed_out"] is False
+    assert waiter["elapsed"] >= 1.0, "foreign wait returned before the child could finish"
+    assert waiter["text"] == starter_result["text"]
+    assert waiter["usage"] == starter_result["usage"]
+    assert waiter["usage"] == {"input_tokens": 10, "output_tokens": 2}  # the fake CLI's own usage
+
+
+def test_wait_on_unknown_run_id_raises_harness_error(tmp_path):
+    with pytest.raises(HarnessError):
+        _observer(tmp_path).wait("no-such-run", timeout=1)
+
+
+def test_wait_on_a_terminal_record_returns_at_once():
+    store = InMemoryRunStore()
+    store.put("run-1", {"run_id": "run-1", "state": RunState.COMPLETED, "text": "done"})
+    began = time.monotonic()
+    result = Harness(store=store).wait("run-1", timeout=30)
+    assert time.monotonic() - began < 2.0
+    assert result.state is RunState.COMPLETED
+    assert result.text == "done"
+
+
+def test_two_parallel_waiters_do_not_block_each_other(tmp_path):
+    run_a = _start_and_let_starter_exit(tmp_path, fake_args=["--sleep", "3", "--reply", "A"])
+    run_b = _start_and_let_starter_exit(tmp_path, fake_args=["--sleep", "3", "--reply", "B"])
+
+    began = time.monotonic()
+    waiter_a = _run_waiter(tmp_path, run_a)
+    waiter_b = _run_waiter(tmp_path, run_b)
+    out_a = _waiter_json(waiter_a)
+    out_b = _waiter_json(waiter_b)
+    elapsed = time.monotonic() - began
+
+    assert out_a["state"] == out_b["state"] == "COMPLETED"
+    assert out_a["text"] == "A"
+    assert out_b["text"] == "B"
+    # Children run concurrently (3 s each). A foreign waiter finalizes a gone
+    # process only after _FINALIZE_GRACE_S (3 s), so one waiter takes ~6.5 s;
+    # serialised waiting would take about twice that (>= 12 s).
+    assert elapsed < 10.0, f"parallel waiters took {elapsed:.1f}s"
+
+
+def test_running_result_carries_liveness_signs(tmp_path):
+    harness = _harness_with_fake(
+        InMemoryRunStore(), "--tool-ticks", "6", "--tick-interval", "0.3"
+    )
+    run_id = harness.start(_spec(tmp_path)).run_id
+
+    deadline = time.monotonic() + 15
+    first = harness.poll(run_id)
+    while first.event_count < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+        first = harness.poll(run_id)
+    assert first.state is RunState.RUNNING
+    assert isinstance(first.last_event_at, float)
+    assert first.duration_s is not None and first.duration_s > 0
+    assert first.last_activity == "tool_use:Bash"
+
+    time.sleep(0.4)
+    timed_out = harness.wait(run_id, timeout=0.2)
+    assert timed_out.timed_out is True
+    assert timed_out.state is RunState.RUNNING
+    assert timed_out.event_count >= first.event_count
+    assert timed_out.duration_s > first.duration_s  # grows while alive
+    assert timed_out.last_activity == "tool_use:Bash"
+
+    final = harness.wait(run_id, timeout=30)
+    assert final.state is RunState.COMPLETED
+    assert final.event_count == 0
+    assert final.last_event_at is None
+
+
+def test_running_result_last_activity_is_none_for_an_unrecognizable_stream(tmp_path):
+    events = tmp_path / "events.jsonl"
+    events.write_bytes(b'{"type": "mystery"}\nnot json at all\n')
+    store = InMemoryRunStore()
+    pid = os.getpid()
+    store.put(
+        "live",
+        {
+            "run_id": "live",
+            "state": RunState.RUNNING,
+            "events_path": events,
+            "run_dir": tmp_path,
+            "provider": "claude",
+            "pid": pid,
+            "start_time": _capture_start_time(pid),
+            "created_at": time.time() - 5,
+        },
+    )
+
+    result = Harness(store=store).poll("live")
+
+    assert result.state is RunState.RUNNING
+    assert result.last_activity is None
+    assert result.duration_s is not None and 5 <= result.duration_s < 60

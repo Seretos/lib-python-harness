@@ -551,3 +551,29 @@ def test_start_resume_accepts_empty_prompt_like_resume(tmp_path):
     assert resumed.state == RunState.COMPLETED
     assert started.state == RunState.RUNNING
     assert harness.wait_for(started.run_id, timeout=30).state == RunState.COMPLETED
+
+
+# -- package 25: an expired resume() timeout detaches, never cancels ----------
+
+
+def test_resume_with_expired_timeout_detaches(tmp_path):
+    from lib_python_harness.runtime.process import _pid_status
+
+    harness = _fake_harness()
+    origin, _ = _origin_run(tmp_path, harness)
+    assert origin.state == RunState.COMPLETED
+    # The follow-up child (same fake binary) must outlive the 1 s limit.
+    slow = _fake_harness(store=harness.store, extra=("--sleep", "4"))
+
+    result = slow.resume(origin.run_id, "follow-up", timeout=1)
+
+    assert result.state == RunState.RUNNING
+    assert result.timed_out is True
+    assert result.run_id != origin.run_id
+    record = slow.store.get(result.run_id)
+    assert record["state"] == RunState.RUNNING  # never CANCELLED by a time limit
+    assert _pid_status(record["pid"], record["start_time"]) is True
+
+    final = slow.wait(result.run_id, timeout=30)
+    assert final.state == RunState.COMPLETED
+    assert final.text == "OK"

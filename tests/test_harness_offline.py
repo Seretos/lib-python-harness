@@ -295,3 +295,72 @@ def test_spawn_failure_writes_provenance(tmp_path, monkeypatch):
     # every other route).
     assert provenance["exit_code"] is None
     assert provenance["duration_s"] == pytest.approx(42.5)
+
+
+# -- package 25: a time limit ends the waiting, never the run -----------------
+
+
+def _slow_harness(sleep="4"):
+    return Harness(
+        store=InMemoryRunStore(),
+        claude_argv=[sys.executable, str(FAKE_CLAUDE), "--sleep", sleep],
+    )
+
+
+def _simple_spec(tmp_path, **kw) -> RunSpec:
+    return RunSpec(
+        prompt="Reply with exactly OK",
+        isolation=Isolation.CLEAN,
+        model="haiku",
+        artifacts_dir=tmp_path / "artifacts",
+        **kw,
+    )
+
+
+def test_wait_timeout_leaves_the_child_running(tmp_path):
+    from lib_python_harness.runtime.process import _pid_status
+
+    harness = _slow_harness()
+    run_id = harness.start(_simple_spec(tmp_path)).run_id
+
+    first = harness.wait(run_id, timeout=1)
+
+    assert first.timed_out is True
+    assert first.state == RunState.RUNNING
+    record = harness.store.get(run_id)
+    assert record["state"] == RunState.RUNNING
+    assert _pid_status(record["pid"], record["start_time"]) is True, "wait() killed the child"
+
+    second = harness.wait(run_id, timeout=30)
+    assert second.state == RunState.COMPLETED
+    assert second.timed_out is False
+    assert second.text == "OK"
+
+
+def test_wait_without_timeout_still_blocks_to_completion(tmp_path):
+    harness = _slow_harness(sleep="1")
+    run_id = harness.start(_simple_spec(tmp_path)).run_id
+
+    result = harness.wait(run_id)
+
+    assert result.state == RunState.COMPLETED
+    assert result.timed_out is False
+    assert result.text == "OK"
+
+
+def test_run_with_expired_timeout_detaches(tmp_path):
+    from lib_python_harness.runtime.process import _pid_status
+
+    harness = _slow_harness()
+
+    result = harness.run(_simple_spec(tmp_path, timeout=1))
+
+    assert result.state == RunState.RUNNING
+    assert result.timed_out is True
+    record = harness.store.get(result.run_id)
+    assert record["state"] == RunState.RUNNING  # never CANCELLED by a time limit
+    assert _pid_status(record["pid"], record["start_time"]) is True
+
+    final = harness.wait(result.run_id, timeout=30)
+    assert final.state == RunState.COMPLETED
+    assert final.text == "OK"

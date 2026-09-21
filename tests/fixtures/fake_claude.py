@@ -69,21 +69,53 @@ def main() -> int:
                 flush=True,
             )
 
+    # --tool-ticks <n>: emit n assistant events whose content is a `tool_use`
+    # block (name "Bash"), spaced --tick-interval apart (default 0.3 s).
+    if "--tool-ticks" in argv:
+        tool_ticks = int(argv[argv.index("--tool-ticks") + 1])
+        interval = 0.3
+        if "--tick-interval" in argv:
+            interval = float(argv[argv.index("--tick-interval") + 1])
+        for n in range(tool_ticks):
+            time.sleep(interval)
+            print(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": f"toolu_{n}",
+                                    "name": "Bash",
+                                    "input": {"command": "ls"},
+                                }
+                            ]
+                        },
+                    }
+                ),
+                flush=True,
+            )
+
     if "--sleep" in argv:
         idx = argv.index("--sleep")
         seconds = float(argv[idx + 1]) if idx + 1 < len(argv) else 5.0
         time.sleep(seconds)
 
+    # --reply <text>: the final answer (default "OK").
+    reply = "OK"
+    if "--reply" in argv:
+        reply = argv[argv.index("--reply") + 1]
     events = [
         {
             "type": "assistant",
-            "message": {"content": [{"type": "text", "text": "OK"}]},
+            "message": {"content": [{"type": "text", "text": reply}]},
         },
         {
             "type": "result",
             "subtype": "success",
             "is_error": False,
-            "result": "OK",
+            "result": reply,
             "session_id": session_id,
             "duration_ms": 42,
             "usage": {"input_tokens": 10, "output_tokens": 2},

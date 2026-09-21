@@ -298,8 +298,8 @@ class Harness:
         until the new run ends: exactly `start_resume()` followed by `wait()`
         on the new run (one code path). Use `start_resume()` to not block.
 
-        `timeout` has `wait()` semantics (an expired timeout cancels the new
-        run).
+        `timeout` has `wait()` semantics: an expired timeout ends the waiting,
+        not the new run, which stays `RUNNING` (`timed_out=True`).
 
         A resume is a NEW run: new `run_id`, the origin's `session_id`, and
         `resumed_from` = the origin's `run_id`; the origin record is left
@@ -415,41 +415,8 @@ class Harness:
         timeout: float | None = None,
         poll_interval: float = 0.25,
     ) -> RunResult:
-        """Block until run `run_id` reaches a terminal state, whichever
-        process started it, and return its result.
-
-        Unlike `wait()`, an expired `timeout` never cancels the run: the
-        returned result has `timed_out=True` and the run stays `RUNNING`
-        (nothing is signalled). `timeout=None` waits indefinitely. A run whose
-        process vanished without finalizing is finalized here once it has been
-        gone for a short grace period (so a `stop()` running in the starter's
-        process wins and is reported `CANCELLED`); with no exit code known,
-        the terminal event alone decides `COMPLETED` vs `FAILED`. Raises
-        `HarnessError` for an unknown `run_id`.
-        """
-        deadline = None if timeout is None else time.monotonic() + timeout
-        gone_since: float | None = None
-        while True:
-            record = self._require_record(run_id)
-            if record["state"] == RunState.RUNNING:
-                if self._finalize_if_ended(run_id, record):
-                    continue
-                if self._is_gone(run_id, record):
-                    now = time.monotonic()
-                    if gone_since is None:
-                        gone_since = now
-                    if now - gone_since >= _FINALIZE_GRACE_S:
-                        self._finalize(run_id, record, None)
-                        continue
-                else:
-                    gone_since = None
-            if record["state"] in _TERMINAL_STATES:
-                return self._record_to_result(record)
-            remaining = None if deadline is None else deadline - time.monotonic()
-            if remaining is not None and remaining <= 0:
-                return replace(self._record_to_result(record), timed_out=True)
-            delay = poll_interval if remaining is None else min(poll_interval, remaining)
-            time.sleep(max(delay, 0.0))
+        """Alias of `wait()` (same semantics, same code path)."""
+        return self.wait(run_id, timeout=timeout, poll_interval=poll_interval)
 
     def list_runs(self) -> list[RunSummary]:
         """Every run in the store, oldest first, as `RunSummary` rows. Runs
@@ -477,18 +444,48 @@ class Harness:
         summaries.sort(key=lambda s: s.created_at or 0.0)
         return summaries
 
-    def wait(self, run_id: str, timeout: float | None = None) -> RunResult:
-        record = self._require_record(run_id)
-        proc = self._processes.get(run_id)
-        if proc is not None and record["state"] == RunState.RUNNING:
-            try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                return self.stop(run_id)
+    def wait(
+        self,
+        run_id: str,
+        timeout: float | None = None,
+        poll_interval: float = 0.25,
+    ) -> RunResult:
+        """Block until run `run_id` reaches a terminal state, whichever
+        process started it, and return its result.
+
+        A time limit ends the WAITING, never the run: an expired `timeout`
+        returns the still-`RUNNING` result with `timed_out=True` (nothing is
+        signalled; continue with `wait(run_id)`). Only an explicit `stop()`
+        ever yields `CANCELLED`. `timeout=None` waits indefinitely. A run
+        whose process vanished without finalizing is finalized here once it
+        has been gone for a short grace period (so a `stop()` running in the
+        starter's process wins and is reported `CANCELLED`); with no exit
+        code known, the terminal event alone decides `COMPLETED` vs `FAILED`.
+        Raises `HarnessError` for an unknown `run_id`.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        gone_since: float | None = None
+        while True:
             record = self._require_record(run_id)
-            self._finalize(run_id, record, proc)
-            record = self._require_record(run_id)
-        return self._record_to_result(record)
+            if record["state"] == RunState.RUNNING:
+                if self._finalize_if_ended(run_id, record):
+                    continue
+                if self._is_gone(run_id, record):
+                    now = time.monotonic()
+                    if gone_since is None:
+                        gone_since = now
+                    if now - gone_since >= _FINALIZE_GRACE_S:
+                        self._finalize(run_id, record, None)
+                        continue
+                else:
+                    gone_since = None
+            if record["state"] in _TERMINAL_STATES:
+                return self._record_to_result(record)
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                return replace(self._record_to_result(record), timed_out=True)
+            delay = poll_interval if remaining is None else min(poll_interval, remaining)
+            time.sleep(max(delay, 0.0))
 
     def run(self, spec: RunSpec) -> RunResult:
         started = self.start(spec)
@@ -745,17 +742,36 @@ class Harness:
         stored = self.store.get(run_id)
         return stored is not None and stored.get("state") in _TERMINAL_STATES
 
+    def _describe_activity(self, record: dict[str, Any], lines: list[str]) -> str | None:
+        """Provider-derived label of the run's newest activity; `None` when
+        the provider has no `describe_last_activity`, the provider is unknown,
+        or anything goes wrong (a liveness sign must never raise)."""
+        try:
+            provider = self._run_providers.get(record.get("run_id"))
+            if provider is None:
+                provider = self._resolve_recorded_provider(record)
+            describe = getattr(provider, "describe_last_activity", None)
+            return describe(lines) if describe is not None else None
+        except Exception:
+            return None
+
     def _record_to_result(self, record: dict[str, Any]) -> RunResult:
         event_count = 0
         last_event_at: float | None = None
+        last_activity: str | None = None
+        duration_s = record.get("duration_s")
         events_path = record.get("events_path")
-        if record.get("state") == RunState.RUNNING and events_path:
-            path = Path(events_path)
-            try:
-                last_event_at = path.stat().st_mtime
-                event_count = len(self._read_event_lines(path))
-            except OSError:
-                pass
+        if record.get("state") == RunState.RUNNING:
+            duration_s = time.time() - record.get("created_at", time.time())
+            if events_path:
+                path = Path(events_path)
+                try:
+                    last_event_at = path.stat().st_mtime
+                    lines = self._read_event_lines(path)
+                    event_count = len(lines)
+                    last_activity = self._describe_activity(record, lines)
+                except OSError:
+                    pass
         return RunResult(
             run_id=record.get("run_id"),
             session_id=record.get("session_id"),
@@ -767,9 +783,10 @@ class Harness:
             cost=record.get("cost"),
             transcript_path=record.get("transcript_path"),
             state=record.get("state"),
-            duration_s=record.get("duration_s"),
+            duration_s=duration_s,
             event_count=event_count,
             last_event_at=last_event_at,
+            last_activity=last_activity,
         )
 
 
