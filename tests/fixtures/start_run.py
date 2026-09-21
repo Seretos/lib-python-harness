@@ -47,6 +47,14 @@ def main() -> int:
     )
     result = harness.start(spec)
     print(json.dumps({"run_id": result.run_id}), flush=True)
+    if "--wait" in argv:
+        # The starter waits itself (same Harness, Popen held) and reports the
+        # final text/usage on a second line.
+        final = harness.wait(result.run_id)
+        print(
+            json.dumps({"state": final.state.name, "text": final.text, "usage": final.usage}),
+            flush=True,
+        )
     if stop_after is not None:
         time.sleep(stop_after)
         harness.stop(result.run_id)

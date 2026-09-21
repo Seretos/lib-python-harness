@@ -482,6 +482,9 @@ class ClaudeCliProvider:
             run_cwd = tempfile.mkdtemp(prefix="lib-python-harness-cwd-")
         return LaunchPlan(argv=argv, cwd=run_cwd, env=_scrub_env(), stdin=prompt)
 
+    def describe_last_activity(self, lines: Iterable[str]) -> str | None:
+        return None  # skeleton; behaviour arrives in the implement phase
+
     def parse_events(self, lines: Iterable[str]) -> RunResult:
         terminal: dict | None = None
         for line in lines:
