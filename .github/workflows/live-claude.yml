@@ -1,0 +1,109 @@
+name: live-claude
+
+# PR-only job that runs the `requires_claude` suite against a real `claude`
+# CLI so those tests are executed (not deselected, not skipped) on the PR.
+# A missing secret fails the job loudly; there is deliberately no
+# continue-on-error and no secret-conditional `if:`.
+on:
+  pull_request:
+    # Live runs draw on the subscription quota behind the token, so skip PRs
+    # that touch neither code, tests, CI scripts nor this workflow.
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "scripts/**"
+      - "pyproject.toml"
+      - ".github/workflows/live-claude.yml"
+
+# A newer push to the same PR supersedes the still-running live job.
+concurrency:
+  group: live-claude-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  live-claude:
+    name: requires_claude (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      # Not CLAUDE_CODE_-prefixed on purpose: the library scrubs that prefix
+      # from every child, and this name must survive into the pytest process.
+      HARNESS_CI_CLAUDE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: Install claude CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Real claude version (pre-shim)
+        run: |
+          REAL="$(command -v claude)"
+          echo "real claude: $REAL"
+          "$REAL" --version
+          echo "HARNESS_CI_CLAUDE_REAL_BIN=$REAL" >> "$GITHUB_ENV"
+
+      - name: Require the CLAUDE_CODE_OAUTH_TOKEN secret
+        run: |
+          if [ -z "$HARNESS_CI_CLAUDE_OAUTH_TOKEN" ]; then
+            echo "::error title=Missing secret::repository secret CLAUDE_CODE_OAUTH_TOKEN is not set (or not available to this PR); the live suite cannot run"
+            exit 1
+          fi
+
+      - name: Install claude shim
+        run: |
+          SHIM_DIR="$RUNNER_TEMP/claude-shim"
+          mkdir -p "$SHIM_DIR"
+          cp scripts/ci/claude-shim.sh "$SHIM_DIR/claude"
+          chmod +x "$SHIM_DIR/claude"
+          echo "$SHIM_DIR" >> "$GITHUB_PATH"
+
+      - name: Prove the shim is the resolved claude
+        run: |
+          RESOLVED="$(command -v claude)"
+          echo "resolved: $RESOLVED"
+          if [ "$RESOLVED" != "$RUNNER_TEMP/claude-shim/claude" ]; then
+            echo "::error::claude does not resolve to the shim (got $RESOLVED)"
+            exit 1
+          fi
+          claude --version
+
+      - name: Auth probe
+        run: |
+          OUT="$(claude -p --model haiku "Reply with exactly OK")"
+          echo "probe output: $OUT"
+          case "$OUT" in
+            *OK*) ;;
+            *) echo "::error::auth probe did not answer OK; the token does not authenticate the CLI headlessly"; exit 1 ;;
+          esac
+
+      - name: Run requires_claude suite
+        run: python -m pytest -m requires_claude -rA --junitxml=live-results.xml
+
+      - name: Assert the live suite was executed
+        if: always()
+        run: python scripts/assert_live_executed.py live-results.xml --require tests/test_inherit_live.py
+
+      - name: Upload junit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-results
+          path: live-results.xml
+          if-no-files-found: warn

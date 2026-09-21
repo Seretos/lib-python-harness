@@ -903,6 +903,21 @@ python -m pytest -m requires_codex -q -s
 python -m pytest -m requires_mistral -q -s
 ```
 
+The PR-only workflow `.github/workflows/live-claude.yml` runs the
+`requires_claude` suite against a real `claude` CLI, so those tests are
+executed on PRs that touch `src/`, `tests/`, `scripts/`, `pyproject.toml` or the
+workflow itself (a newer push cancels the running job), rather than deselected. It reads the repository secret
+`CLAUDE_CODE_OAUTH_TOKEN` (a `claude setup-token` string). If that secret is
+missing the job fails loudly with an `::error::` line; it never skips. After
+pytest, `scripts/assert_live_executed.py` checks that the junit report shows
+at least one executed test, no skipped test, and an executed
+`tests/test_inherit_live.py`.
+
+The library scrubs `CLAUDE_CODE_*` from every child process by design, so CI
+puts a small shim (`scripts/ci/claude-shim.sh`) ahead of `claude` on `PATH`.
+It re-injects the token as `CLAUDE_CODE_OAUTH_TOKEN` inside the child and
+execs the real binary; the scrub itself is left untouched.
+
 `requires_codex` and `requires_mistral` tests never run in the default suite
 (`addopts` excludes `requires_claude`, `requires_codex` and `requires_mistral`).
 
