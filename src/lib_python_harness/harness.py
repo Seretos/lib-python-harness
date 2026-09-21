@@ -487,7 +487,6 @@ class Harness:
             delay = poll_interval if remaining is None else min(poll_interval, remaining)
             time.sleep(max(delay, 0.0))
 
-
     def run(self, spec: RunSpec) -> RunResult:
         started = self.start(spec)
         return self.wait(started.run_id, timeout=spec.timeout)
