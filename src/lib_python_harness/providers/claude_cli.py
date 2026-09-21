@@ -176,11 +176,20 @@ def _split_tools(value: str | None) -> list[str] | None:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _agent_body(spec: RunSpec) -> str:
+    """The agent definition's body: `system_prompt` when set (a `resolve(...,
+    task=...)` spec, where `prompt` is the task), else `prompt` (specs that
+    set only `prompt=`). `is not None`, not `or`: an empty body stays empty."""
+    if spec.system_prompt is not None:
+        return spec.system_prompt
+    return spec.prompt or ""
+
+
 def _build_agent_payload(spec: RunSpec, accepted_keys: Iterable[str]) -> dict[str, Any]:
     accepted = set(accepted_keys)
     candidate: dict[str, Any] = {
         "description": spec.description,
-        "prompt": spec.prompt,
+        "prompt": _agent_body(spec),
         "tools": _split_tools(spec.tools),
         "disallowedTools": _split_tools(spec.disallowed_tools),
         "model": spec.model,
@@ -253,7 +262,7 @@ def materialize_agent_dir(spec: RunSpec, run_dir: Path | str) -> Path:
         if value is not None:
             fields[key] = value
 
-    dest.write_text(dump_frontmatter(fields, spec.prompt or ""))
+    dest.write_text(dump_frontmatter(fields, _agent_body(spec)))
     return dest
 
 

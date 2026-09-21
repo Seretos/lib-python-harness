@@ -516,7 +516,6 @@ def test_task_payload_carrier_carries_body_not_task(tmp_path):
     payload = json.loads(plan.argv[plan.argv.index("--agents") + 1])["reviewer"]
     assert payload["prompt"] == "Do the review."
     assert plan.stdin == "abc"
-    assert "Do the review." not in plan.stdin
 
 
 def test_task_materialized_carrier_carries_body_not_task(tmp_path):
@@ -528,7 +527,6 @@ def test_task_materialized_carrier_carries_body_not_task(tmp_path):
     _fields, body = parse_frontmatter(md.read_text())
     assert body.strip() == "Do the review."
     assert plan.stdin == "abc"
-    assert "Do the review." not in plan.stdin
 
 
 def test_task_materialized_body_with_fence_marker_survives(tmp_path):
@@ -552,6 +550,7 @@ def test_task_empty_body_yields_empty_agent_body_not_the_task(tmp_path):
 
 def test_resolve_without_task_is_unchanged():
     import dataclasses
+    import inspect
 
     from lib_python_harness.resolve import resolve
 
@@ -560,15 +559,39 @@ def test_resolve_without_task_is_unchanged():
         _host_context(cwd="/tmp/irrelevant"),
     )
     got = dataclasses.asdict(spec)
-    assert got["prompt"] == "Do the review."
-    assert got["system_prompt"] == "Do the review."
-    assert got["isolation"] == Isolation.INHERIT
-    assert got["model"] == "sonnet"
-    assert got["permission_mode"] == "plan"
-    assert got["tools"] == "Read"
-    assert got["agent_name"] == "reviewer"
-    assert got["description"] == "Reviews code"
-    assert got["effort"] == "medium"
+    defaults = {f.name: f.default for f in dataclasses.fields(RunSpec)
+                if f.default is not dataclasses.MISSING}
+    expected = {
+        **defaults,
+        "prompt": "Do the review.",
+        "system_prompt": "Do the review.",
+        "isolation": Isolation.INHERIT,
+        "model": "sonnet",
+        "effort": "medium",
+        "cwd": "/tmp/irrelevant",
+        "mcp_servers": {},
+        "permission_mode": "plan",
+        "tools": "Read",
+        "agent_name": "reviewer",
+        "description": "Reviews code",
+    }
+    assert got == expected
+    # Existing positional call shape (definition, context, config) is intact.
+    params = list(inspect.signature(resolve).parameters.values())
+    assert [p.name for p in params[:3]] == ["definition", "host_context", "config"]
+    assert params[3].name == "task"
+    assert params[3].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_agent_body_falls_back_to_prompt_when_system_prompt_unset(tmp_path):
+    import json
+
+    plan = _inherit_plan(
+        tmp_path, prompt="Only a prompt.", agent_name="solo", description="d"
+    )
+    payload = json.loads(plan.argv[plan.argv.index("--agents") + 1])["solo"]
+    assert payload["prompt"] == "Only a prompt."
+    assert plan.stdin == "Only a prompt."
 
 
 def test_clean_spec_prompt_stays_stdin_and_system_prompt_flag(tmp_path):

@@ -381,7 +381,7 @@ def _task_harness_and_ctx(tmp_path):
     )
     context = SimpleNamespace(
         cwd=repo, model="haiku", permission_mode="default", effort="medium",
-        mcp_servers={},
+        mcp_servers=None,
     )
     harness = Harness(
         store=InMemoryRunStore(),
@@ -397,7 +397,6 @@ def test_task_reaches_child_stdin_only(tmp_path):
     result = harness.run(resolve(definition, context, task="abc"))
 
     assert result.text.strip() == "abc"
-    assert "BODY-MARKER-XYZ" not in result.text
     argv = harness.store.get(result.run_id)["argv"]
     assert "BODY-MARKER-XYZ" in json.dumps(argv)
 
