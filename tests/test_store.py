@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -134,7 +135,10 @@ def test_get_retries_while_record_is_momentarily_unparseable(tmp_path):
     timer = threading.Timer(0.05, restore)
     timer.start()
     try:
+        started = time.monotonic()
         assert store.get("run-1") == full
+        # Returns as soon as the record is restored, well inside the deadline.
+        assert time.monotonic() - started < 0.9
         path.write_text('{"run_id": "run-1", "st')
         timer2 = threading.Timer(0.05, restore)
         timer2.start()
@@ -150,8 +154,11 @@ def test_permanently_unparseable_record_still_raises(tmp_path):
     store = FileRunStore(artifacts_dir=tmp_path)
     store.put("run-1", _record())
     (tmp_path / "run-1" / "record.json").write_text('{"run_id": "run-1", "st')
+    started = time.monotonic()
     with pytest.raises(json.JSONDecodeError):
         store.get("run-1")
+    # Retries up to the deadline (~_REPLACE_RETRY_S = 1 s), then gives up.
+    assert 0.8 <= time.monotonic() - started < 5.0
 
 
 def test_concurrent_puts_from_threads_never_tear_the_record(tmp_path):
