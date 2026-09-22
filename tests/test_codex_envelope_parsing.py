@@ -74,7 +74,7 @@ def test_schema_stream_yields_structured_output_when_requested(tmp_path):
               "required": ["answer"], "additionalProperties": False}
     (tmp_path / "cwd").mkdir()
     provider.build_launch_plan(
-        RunSpec(prompt="p", isolation=Isolation.CLEAN, model="m", provider="codex",
+        RunSpec(prompt="p", isolation=Isolation.CLEAN, model="gpt-5.6-luna", provider="codex",
                 json_schema=schema, cwd=tmp_path / "cwd"),
         session_id=str(uuid.uuid4()), run_dir=tmp_path / "run",
     )

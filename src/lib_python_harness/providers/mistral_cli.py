@@ -26,8 +26,18 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..errors import UnsupportedByProvider
-from .base import Isolation, LaunchPlan, RunResult, RunSpec
+from .base import Isolation, LaunchPlan, RunResult, RunSpec, check_spec_values
 from .isolation import _resolve_clean_cwd, scrub_env
+
+# vibe has no `--model` flag and no CLI-side alias (the value travels
+# verbatim as `VIBE_ACTIVE_MODEL`), so only the family-token check applies.
+# No effort set: mistral already rejects the `effort` *field* outright via
+# `_UNSUPPORTED_FIELDS` below, so `check_spec_values` is called with
+# `efforts=None` — nothing further to validate for value membership.
+_MODEL_ALIASES: frozenset[str] = frozenset()
+_MODEL_FAMILIES: frozenset[str] = frozenset(
+    {"mistral", "magistral", "ministral", "devstral", "codestral", "pixtral"}
+)
 
 # Matches no real tool name, so `--enabled-tools` with it disables them all.
 _NO_TOOLS_SENTINEL = "__harness_no_tools__"
@@ -88,6 +98,14 @@ class MistralCliProvider:
                 + ", ".join(offending)
                 + " (Isolation.CLEAN only; Claude-specific fields are unsupported)"
             )
+
+        check_spec_values(
+            spec,
+            provider=self.name,
+            aliases=_MODEL_ALIASES,
+            families=_MODEL_FAMILIES,
+            efforts=None,
+        )
 
         cwd = _resolve_clean_cwd(spec)
 

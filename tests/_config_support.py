@@ -61,6 +61,14 @@ def definition(
 
 
 def host(cwd, **fields) -> HostContext:
+    # #36: `resolve()`'s `model = definition.model or host_context.model`
+    # fallback now has to land on a value the claude namespace check
+    # accepts (an unset model is rejected before any run starts, same as an
+    # unknown one) — these config/mcp/isolation tests don't care what the
+    # model is, so a fixed valid default keeps them realistic without
+    # touching each call site; a test that cares about model fallback still
+    # overrides it explicitly (e.g. `host(repo, model="opus")`).
+    fields.setdefault("model", "sonnet")
     return HostContext(cwd=cwd, **fields)
 
 
