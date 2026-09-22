@@ -27,8 +27,22 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..errors import UnsupportedByProvider
-from .base import Isolation, LaunchPlan, RunResult, RunSpec
+from .base import Isolation, LaunchPlan, RunResult, RunSpec, check_spec_values
 from .isolation import _resolve_clean_cwd, scrub_env
+
+# codex has no CLI-side model alias (the value is passed straight through as
+# `-m`), so the namespace rule has no alias set — only the family-token
+# check applies.
+_MODEL_ALIASES: frozenset[str] = frozenset()
+_MODEL_FAMILIES: frozenset[str] = frozenset({"gpt", "o3", "o4", "codex", "openai"})
+
+# codex's own closed `-c model_reasoning_effort=` value set (plan P1,
+# grepped from the installed binary: the serde variant list
+# `none minimal low medium high xhigh max`). Differs from claude's set —
+# `none`/`minimal` are codex-only.
+_EFFORT_VALUES: frozenset[str] = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
 
 CODEX_CLEAN_ARGV_FLAGS: tuple[str, ...] = (
     "exec",
@@ -120,6 +134,14 @@ class CodexCliProvider:
                 + ", ".join(offending)
                 + " (Isolation.CLEAN only; Claude-specific fields are unsupported)"
             )
+
+        check_spec_values(
+            spec,
+            provider=self.name,
+            aliases=_MODEL_ALIASES,
+            families=_MODEL_FAMILIES,
+            efforts=_EFFORT_VALUES,
+        )
 
         cwd = _resolve_clean_cwd(spec)
 

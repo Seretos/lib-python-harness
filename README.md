@@ -361,6 +361,22 @@ the `Isolation.CLEAN` recipe (scrubbed env, `--setting-sources ""`,
 `--strict-mcp-config`, no tools, no slash commands) when it builds a
 `LaunchPlan`.
 
+**`model`/`effort` validation.** `build_launch_plan()` rejects an unusable
+`model` or `effort` synchronously — before any run record, artifact
+directory or child process exists — raising `UnsupportedByProvider` with a
+message naming the acceptable values (see "UnsupportedByProvider" below).
+`model` is checked by namespace, not by an exact list (the real CLI accepts
+open-ended Bedrock/Vertex/gateway ids it never enumerates): a value is
+accepted if it is one of the aliases `sonnet`, `opus`, `haiku`, `fable`,
+`default`, `inherit` (case-insensitive), or if splitting it on any run of
+non-alphanumeric characters yields at least one token in `claude`,
+`anthropic`, `sonnet`, `opus`, `haiku`, `fable` — so `claude-opus-5[1m]` and
+`anthropic.claude-3-5-sonnet-20241022-v2:0` are both accepted, while a typo
+like `opuss` is rejected. An empty, absent, whitespace-only, or
+leading-dash model is rejected the same way. `effort` is checked by exact
+membership in `low`, `medium`, `high`, `xhigh`, `max` (the claude CLI's own
+set; `effort=None` is always valid — the flag is simply not emitted).
+
 ```python
 from pathlib import Path
 import uuid
@@ -428,6 +444,14 @@ Use one provider instance per run (`Harness` does): whether a `json_schema`
 was requested — which decides `structured_output` — is remembered from
 `build_launch_plan` when `parse_events` runs.
 
+**`model`/`effort` validation.** Same synchronous check as
+`ClaudeCliProvider` (see above), with codex's own namespace: `model` has no
+CLI-side alias, so it is accepted only via the family-token rule, against
+`gpt`, `o3`, `o4`, `codex`, `openai` (e.g. `gpt-5.6-luna`). `effort` is
+checked against codex's own closed set — `none`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, `max` — which includes `none`/`minimal`, values
+the claude CLI does not accept.
+
 On native Windows `codex` is an npm `.cmd` shim: the harness resolves it via
 `PATH`/`PATHEXT` and `stop()` kills the whole process tree (`taskkill /T /F`).
 
@@ -476,6 +500,14 @@ ignore project config, which is the stronger isolation.
 
 `Harness.resume` is unsupported for Mistral runs (`UnsupportedByProvider`).
 
+**`model` validation.** Same synchronous namespace check as the other two
+providers (see "ClaudeCliProvider" above): `vibe` has no CLI-side alias
+either, so `model` is accepted only via the family-token rule, against
+`mistral`, `magistral`, `ministral`, `devstral`, `codestral`, `pixtral`
+(e.g. `mistral-medium-3.5`). Mistral has no `effort` concept — `effort` is
+already rejected outright as an unsupported *field* (see the mapping table
+below), so there is no separate value check for it.
+
 Isolation: `VIBE_HOME` relocates config, `AGENTS.md`, skills, agents, plugins,
 hooks, `.env`, MCP servers and session logs, so each run gets a fresh empty
 private `VIBE_HOME` (deleted by `Harness` when the run ends) and every
@@ -517,9 +549,22 @@ truncated. The events file is read as UTF-8 (Vibe does not ASCII-escape JSON).
 ### UnsupportedByProvider
 
 A `HarnessError` raised by a provider's `build_launch_plan()` — before
-anything is spawned or recorded — when the `RunSpec` sets a field that
-provider cannot honour. The message names every offending field at once. The
-rule is the same whether the field came from the caller or from
+anything is spawned or recorded — in two situations:
+
+- the `RunSpec` sets a **field** that provider cannot honour at all (the
+  message names every offending field at once); or
+- the `RunSpec` sets a **`model` or `effort` value** the provider cannot
+  honour (the message names the field, the rejected value, and the
+  acceptable values/namespace for that provider — see each provider's
+  section above for its exact rule). This closes two symptoms an unchecked
+  typo used to produce: an unknown `model` used to return `RUNNING`
+  immediately and only fail seconds later, asynchronously, with a message
+  that referenced the CLI's own `--model` flag rather than the caller's
+  `RunSpec`; an unknown `effort` used to be silently accepted (or silently
+  dropped, depending on the CLI) with no indication the run had used a
+  different effort than requested.
+
+The rule is the same whether the field/value came from the caller or from
 `.seretos/harness.yml`.
 
 ```python
@@ -530,6 +575,11 @@ try:
                 provider="codex", permission_mode="plan"))
 except UnsupportedByProvider as exc:
     print(f"codex cannot do that: {exc}")
+
+try:
+    run(RunSpec(prompt="hi", isolation=Isolation.CLEAN, model="opuss"))
+except UnsupportedByProvider as exc:
+    print(f"unusable model: {exc}")
 ```
 
 ### RunStore

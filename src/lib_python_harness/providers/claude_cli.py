@@ -25,8 +25,30 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..errors import UnsafeCwdError
-from .base import Isolation, LaunchPlan, RunResult, RunSpec
+from .base import Isolation, LaunchPlan, RunResult, RunSpec, check_spec_values
 from .isolation import _raises_if_git_ancestor, _resolve_clean_cwd, scrub_env  # noqa: F401
+
+# Verified against the installed `claude` CLI binary (plan P1/P2, round 2):
+# the alias set the CLI's own `--model` help text names, plus `default` (the
+# CLI's own "use whatever the profile default is" alias) and `inherit` (a
+# legal *agent-definition* model value — not a CLI flag alias, but
+# `resolve()` passes it straight through into `RunSpec.model`, and it must
+# keep starting a run, P3). `_MODEL_FAMILIES` is the namespace-rule token set
+# a model id (full dated id, Bedrock/Vertex/gateway id, ...) is checked
+# against when it is not one of the aliases above.
+_MODEL_ALIASES: frozenset[str] = frozenset(
+    {"sonnet", "opus", "haiku", "fable", "default", "inherit"}
+)
+_MODEL_FAMILIES: frozenset[str] = frozenset(
+    {"claude", "anthropic", "sonnet", "opus", "haiku", "fable"}
+)
+
+# The claude CLI's own closed `--effort` value set (plan P1, grepped from the
+# installed binary: `cu=["low","medium","high","xhigh","max"]`). Deliberately
+# does NOT include "minimal"/"none" — those are codex-only; claude silently
+# warns and falls back to the default effort for a value outside this set,
+# which is exactly the ticket's silent-typo symptom this check closes.
+_EFFORT_VALUES: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 # Explicit, enumerable names this build scrubs from the child's environment —
 # a fixed constant (not a runtime-derived pattern) so a test can plant each
@@ -347,6 +369,13 @@ class ClaudeCliProvider:
         whatever the production set happens to be today. Only consulted for
         `Isolation.INHERIT` runs that set `agent_name`; ignored otherwise.
         """
+        check_spec_values(
+            spec,
+            provider=self.name,
+            aliases=_MODEL_ALIASES,
+            families=_MODEL_FAMILIES,
+            efforts=_EFFORT_VALUES,
+        )
         if spec.isolation is Isolation.INHERIT:
             return self._build_inherit_plan(
                 spec, session_id=session_id, run_dir=run_dir, accepted_keys=accepted_keys

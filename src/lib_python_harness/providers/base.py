@@ -37,9 +37,12 @@ is open" sentence documents no boundary at all):
 from __future__ import annotations
 
 import enum
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Protocol
+
+from ..errors import UnsupportedByProvider
 
 
 class Isolation(enum.Enum):
@@ -163,6 +166,69 @@ class RunResult:
     event_count: int = 0
     last_event_at: float | None = None
     last_activity: str | None = None
+
+
+# Splits a lowercased model string into namespace tokens for the family
+# check below: any run of characters that is not `[a-z0-9]` is a separator
+# (covers `-`, `.`, `_`, `:`, `[`, `]`, ...).
+_MODEL_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+
+
+def check_spec_values(
+    spec: RunSpec,
+    *,
+    provider: str,
+    aliases: frozenset[str] = frozenset(),
+    families: frozenset[str] = frozenset(),
+    efforts: frozenset[str] | None = None,
+) -> None:
+    """Raise `UnsupportedByProvider` if `spec.model` or `spec.effort` is a
+    value `provider` cannot honour. Called as the **first statement** of
+    every provider's `build_launch_plan`, before any run record, artifact
+    directory or child process exists (`Harness.start` calls
+    `build_launch_plan` before `_launch` creates any of those).
+
+    **Model** — a namespace rule, not a fixed list (round-2 plan P2: the
+    real CLIs take the model value verbatim and pass it straight to the
+    provider's API, so an exact allowlist would reject legal Bedrock/Vertex/
+    gateway ids and dated full ids). The value is lowercased; it is accepted
+    if it equals one of `aliases` verbatim, or if splitting it on any
+    non-alphanumeric run yields at least one token present in `families`.
+    An empty/absent/whitespace-only value, or one with a leading `-` (which
+    the CLI itself would read as a flag, not an operand), is rejected by
+    this same check — it is a sub-case of "no alias, no family token", not a
+    separate mechanism.
+
+    **Effort** — exact membership in `efforts`, the provider's own closed,
+    per-provider set (P1: the sets differ per CLI, e.g. `minimal`/`none` are
+    codex-only). `spec.effort=None` is always valid — the flag is simply
+    never emitted. `efforts=None` means this provider has no effort concept
+    to check here at all (mistral: it already rejects the `effort` *field*
+    outright via its own `_UNSUPPORTED_FIELDS`, so nothing further to
+    validate for value membership).
+    """
+    model = spec.model
+    lowered = (model or "").strip().lower()
+    is_valid_model = bool(lowered) and not lowered.startswith("-") and (
+        lowered in aliases
+        or any(
+            token in families
+            for token in _MODEL_TOKEN_SPLIT.split(lowered)
+            if token
+        )
+    )
+    if not is_valid_model:
+        raise UnsupportedByProvider(
+            f"model {model!r} is not usable by the {provider} provider; "
+            f"expected an alias ({', '.join(sorted(aliases))}) or a model id "
+            f"in the {provider} namespace ({', '.join(sorted(families))})"
+        )
+
+    if efforts is not None and spec.effort is not None and spec.effort not in efforts:
+        raise UnsupportedByProvider(
+            f"effort {spec.effort!r} is not supported by the {provider} "
+            f"provider; valid values: {', '.join(sorted(efforts))}"
+        )
 
 
 class Provider(Protocol):

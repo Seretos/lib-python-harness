@@ -84,7 +84,7 @@ def test_default_provider_is_still_claude(tmp_path):
     run_cwd = tmp_path / "run-cwd"
     run_cwd.mkdir()
     result = harness.run(RunSpec(  # provider deliberately omitted
-        prompt="Reply with exactly OK", isolation=Isolation.CLEAN, model="gpt-5.6-luna",
+        prompt="Reply with exactly OK", isolation=Isolation.CLEAN, model="haiku",
         cwd=run_cwd, allow_nonempty_cwd=True, artifacts_dir=tmp_path / "artifacts",
     ))
 
@@ -105,7 +105,10 @@ def test_explicit_provider_instance_wins_for_its_own_name(tmp_path):
     harness = Harness(
         claude_argv=[sys.executable, str(FAKE_CLAUDE)], provider=RecordingClaude()
     )
-    result = harness.run(_spec(tmp_path, provider="claude"))
+    # _spec()'s default model ("gpt-5.6-luna") is codex-namespaced; this test
+    # exercises claude dispatch, so it needs a model the claude provider's
+    # #36 namespace check accepts.
+    result = harness.run(_spec(tmp_path, provider="claude", model="haiku"))
     assert _provenance(harness, result.run_id)["provider"] == "claude"
     assert len(calls) == 1, "the injected instance was not the one used"
 
