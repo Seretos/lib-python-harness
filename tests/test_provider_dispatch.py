@@ -78,7 +78,7 @@ def test_provider_codex_spawns_codex_exec_not_claude(tmp_path):
 
 def test_default_provider_is_still_claude(tmp_path):
     # RunSpec's own default, without passing provider at all
-    assert RunSpec(prompt="p", isolation=Isolation.CLEAN, model="m").provider == "claude"
+    assert RunSpec(prompt="p", isolation=Isolation.CLEAN, model="haiku").provider == "claude"
 
     harness = Harness(claude_argv=[sys.executable, str(FAKE_CLAUDE)])
     run_cwd = tmp_path / "run-cwd"

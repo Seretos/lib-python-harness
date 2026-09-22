@@ -106,7 +106,7 @@ def test_env_uses_fresh_home_model_alias_and_connectors_off(tmp_path, monkeypatc
     real.mkdir()
     (real / "AGENTS.md").write_text("PWNED")
     monkeypatch.setenv("VIBE_HOME", str(real))
-    other_model = f"model-{uuid.uuid4().hex[:6]}"
+    other_model = f"mistral-other-{uuid.uuid4().hex[:6]}"
     plan = _plan(tmp_path, model=other_model)
     env = plan.env
 
@@ -128,10 +128,10 @@ def test_parent_vibe_variables_never_reach_the_child(tmp_path, monkeypatch):
     monkeypatch.setenv("VIBE_ENABLE_CONNECTORS", "true")
     monkeypatch.setenv("VIBE_SYSTEM_PROMPT_ID", "callers-prompt")
     monkeypatch.setenv("VIBE_FOO_BAR", "x")
-    env = _plan(tmp_path, model="spec-model").env
+    env = _plan(tmp_path, model="mistral-spec-model").env
     assert {k for k in env if k.startswith("VIBE_")} == {
         "VIBE_HOME", "VIBE_ACTIVE_MODEL", "VIBE_ENABLE_CONNECTORS"}
-    assert env["VIBE_ACTIVE_MODEL"] == "spec-model"
+    assert env["VIBE_ACTIVE_MODEL"] == "mistral-spec-model"
     assert env["VIBE_ENABLE_CONNECTORS"] == "false"
     assert env["VIBE_HOME"] != str(tmp_path / "real")
 
