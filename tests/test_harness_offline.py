@@ -17,6 +17,12 @@ R4 — every terminal state writes a provenance record: both the CANCELLED
 route (`stop()`) and the spawn-failure FAILED route (`start()`'s
 `_spawn_detached` raising) are gaps `_finalize`'s unconditional write does
 not cover, per plan Approach / Premises verified.
+
+R2 (#37) — a definition-driven INHERIT dispatch's session-level tool
+restriction (R1's own argv-level pair, plan .adev/37-2/plan.md) actually
+reaches the spawned child, observed through that run's own `events.jsonl`
+`init` event (`tests/fixtures/fake_claude.py`'s `tools` key, gained for this
+ticket).
 """
 from __future__ import annotations
 
@@ -407,3 +413,143 @@ def test_without_task_child_stdin_is_the_body(tmp_path):
     harness, definition, context = _task_harness_and_ctx(tmp_path)
     result = harness.run(resolve(definition, context))
     assert result.text.strip() == "BODY-MARKER-XYZ"
+
+
+# -- R2 (#37): the definition's tools: restriction reaches the spawned ------
+# -- child, observed through events.jsonl's own init event. ----------------
+
+# The three names the ticket calls directly-callable in the harness plus the
+# four deferred families -- all seven confirmed present in R0's plain-probe
+# `init` list (.adev/37-2/r0/probe1.jsonl) and absent from its --tools
+# Read,Glob probe (.adev/37-2/r0/probe2.jsonl); see fake_claude.py's own
+# FAKE_DEFAULT_TOOLS comment for the full R0 citation.
+FORBIDDEN_TOOL_NAMES = frozenset(
+    {
+        "ListAgents",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskStop",
+        "TaskUpdate",
+        "RemoteTrigger",
+        "PushNotification",
+    }
+)
+
+
+def _write_cluster_tester_definition(tmp_path, *, tools_line: str | None):
+    """A real `.md` agent-definition file -- the ticket's own
+    `agent-mcp-tester:cluster-tester` shape -- for `load_agent_definition`
+    to load, per the plan's explicit correction that R2 must dispatch
+    through `resolve(definition, host_context)`, not a bare `RunSpec(...)`.
+    """
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir(exist_ok=True)
+    path = agents_dir / "cluster-tester.md"
+    lines = [
+        "---",
+        "name: cluster-tester",
+        "description: R2 (#37) test double.",
+        "model: sonnet",
+    ]
+    if tools_line is not None:
+        lines.append(f"tools: {tools_line}")
+    lines.append("---")
+    path.write_text("\n".join(lines) + "\nDo the cluster check.\n")
+    return path
+
+
+def _init_event_tools(events_path):
+    for line in Path(events_path).read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        event = json.loads(line)
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            return event.get("tools")
+    raise AssertionError(f"no init event found in {events_path}")
+
+
+def test_definition_tool_restriction_reaches_the_child_init_event(tmp_path):
+    """R2 (#37): a `cluster-tester` definition with `tools: Read, Glob`,
+    loaded by `load_agent_definition` -> `resolve()` -> `Harness.run()`
+    against the fake CLI, must produce an `init` event whose `tools` list is
+    exactly `{"Read", "Glob"}` and holds none of the seven forbidden names
+    the fixture's default set carries (FORBIDDEN_TOOL_NAMES above).
+
+    Expected RED reason: no --tools flag reaches fake_claude.py today (the
+    same defect R1 pins at the argv level: emission is gated on
+    `spec.session_tools`, which `resolve()` never sets), so its init event
+    carries the fixture's stand-in FAKE_DEFAULT_TOOLS set instead -- this
+    assertion fails reporting ListAgents/ReportFindings/ScheduleWakeup/...
+    present: the reported symptom, reproduced end-to-end through the run's
+    own recorded events.jsonl.
+    """
+    from lib_python_harness.agents.frontmatter import load_agent_definition
+    from lib_python_harness.host.context import HostContext
+    from lib_python_harness.resolve import resolve
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    definition_path = _write_cluster_tester_definition(tmp_path, tools_line="Read, Glob")
+    definition = load_agent_definition(definition_path, source_scope="project")
+    host_context = HostContext(
+        cwd=repo, model="sonnet", permission_mode="default", effort="medium",
+        mcp_servers={},
+    )
+    spec = resolve(definition, host_context)
+
+    harness = Harness(
+        store=InMemoryRunStore(),
+        claude_argv=[sys.executable, str(FAKE_CLAUDE)],
+    )
+    result = harness.run(spec)
+    record = harness.store.get(result.run_id)
+    tools = _init_event_tools(record["events_path"])
+
+    assert set(tools) == {"Read", "Glob"}
+    assert not (set(tools) & FORBIDDEN_TOOL_NAMES)
+
+
+def test_definition_with_no_tools_still_shows_the_default_set(tmp_path):
+    """Additional edge-case coverage for R2: a definition with no `tools:`
+    at all is the plan's first documented deviation (no --tools emitted,
+    entrypoint default kept) -- the init event's tools list must still carry
+    the fixture's (unrestricted) default set, including the forbidden names,
+    so the main arm above is not vacuously true for a fixture that always
+    narrows regardless of argv. Expected to already pass before the fix too
+    (an absent `tools:` never reached `spec.session_tools` either) -- not
+    itself a RED-bearing assertion, per the plan's "Additional edge-case
+    coverage" note.
+    """
+    from lib_python_harness.agents.frontmatter import load_agent_definition
+    from lib_python_harness.host.context import HostContext
+    from lib_python_harness.resolve import resolve
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    definition_path = _write_cluster_tester_definition(tmp_path, tools_line=None)
+    definition = load_agent_definition(definition_path, source_scope="project")
+    host_context = HostContext(
+        cwd=repo, model="sonnet", permission_mode="default", effort="medium",
+        mcp_servers={},
+    )
+    spec = resolve(definition, host_context)
+    assert spec.tools is None
+
+    harness = Harness(
+        store=InMemoryRunStore(),
+        claude_argv=[sys.executable, str(FAKE_CLAUDE)],
+    )
+    result = harness.run(spec)
+    record = harness.store.get(result.run_id)
+    tools = _init_event_tools(record["events_path"])
+
+    assert FORBIDDEN_TOOL_NAMES <= set(tools)

@@ -381,6 +381,119 @@ def test_tools_and_disallowed_tools_never_become_top_level_argv_flags(tmp_path):
     assert "--disallowedTools" not in plan.argv
 
 
+def test_definition_tools_become_the_session_allowlist_and_the_agent_scope(tmp_path):
+    """R1 (#37): a `resolve(definition, host_context)`-driven INHERIT
+    dispatch -- `agent_name` and `tools` both set from one `AgentDefinition`,
+    the ticket's own shape -- must put the definition's `tools:` on the
+    child's command line as a top-level `--tools` session allowlist, once,
+    *alongside* the existing agent-scope carrier (the `--agents` JSON
+    payload's own `tools` array, or the materialized file's own `tools:`
+    frontmatter line). Today `--tools` is gated on `spec.session_tools`,
+    which `resolve()` never sets (only `config/apply.py`'s named-profile
+    path writes that duplicate field) -- so arms 1-3 below fail RED with
+    `--tools` entirely absent from argv, while their `--agents`/frontmatter
+    assertions already pass: the defect is the missing *session* scope only,
+    not the agent scope (plan R1 "Expected RED reason").
+    """
+    import json
+
+    from lib_python_harness.agents.frontmatter import parse_frontmatter
+    from lib_python_harness.resolve import resolve
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+
+    # Arm 1: payload dispatch, tools="Read, Glob".
+    spec = resolve(
+        _definition(model="sonnet", tools="Read, Glob"), _host_context(cwd=repo)
+    )
+    plan = ClaudeCliProvider().build_launch_plan(
+        spec, session_id=str(uuid.uuid4()), run_dir=tmp_path / "run1"
+    )
+    argv = plan.argv
+    assert [t for t in argv if t == "--tools"] == ["--tools"]
+    assert argv[argv.index("--tools") + 1] == "Read,Glob"
+    agents_json = json.loads(argv[argv.index("--agents") + 1])
+    assert agents_json[spec.agent_name]["tools"] == ["Read", "Glob"]
+
+    # Arm 2: same shape, tools="Bash" -- anti-tautology (the pattern this
+    # module already uses at :79-87 / :278-289): a provider that hard-coded
+    # "Read,Glob" would still satisfy arm 1 alone.
+    spec2 = resolve(_definition(model="sonnet", tools="Bash"), _host_context(cwd=repo))
+    plan2 = ClaudeCliProvider().build_launch_plan(
+        spec2, session_id=str(uuid.uuid4()), run_dir=tmp_path / "run2"
+    )
+    argv2 = plan2.argv
+    assert [t for t in argv2 if t == "--tools"] == ["--tools"]
+    assert argv2[argv2.index("--tools") + 1] == "Bash"
+    agents_json2 = json.loads(argv2[argv2.index("--agents") + 1])
+    assert agents_json2[spec2.agent_name]["tools"] == ["Bash"]
+
+    # Arm 3: materialized dispatch, forced by mcp_servers= -- a key outside
+    # AGENT_JSON_KEYS, the same forcing device this module already uses at
+    # :156-204 and :474-484. The session-level --tools flag is independent
+    # of dispatch mode, so it must still be emitted here; the materialized
+    # file's own tools: frontmatter line must still carry the definition's
+    # raw (unsplit) value, unaffected by the session flag's own normalization.
+    spec3 = resolve(
+        _definition(
+            model="sonnet",
+            tools="Read, Glob",
+            mcp_servers={"demo": {"command": "x"}},
+        ),
+        _host_context(cwd=repo),
+    )
+    run_dir3 = tmp_path / "run3"
+    plan3 = ClaudeCliProvider().build_launch_plan(
+        spec3, session_id=str(uuid.uuid4()), run_dir=run_dir3
+    )
+    argv3 = plan3.argv
+    assert "--agents" not in argv3
+    assert [t for t in argv3 if t == "--tools"] == ["--tools"]
+    assert argv3[argv3.index("--tools") + 1] == "Read,Glob"
+    materialized_path = run_dir3 / "agents" / ".claude" / "agents" / f"{spec3.agent_name}.md"
+    fields, _body = parse_frontmatter(materialized_path.read_text())
+    assert fields["tools"] == "Read, Glob"
+
+    # Arm 4: no tools: on the definition -> no top-level --tools flag.
+    spec4 = resolve(_definition(model="sonnet"), _host_context(cwd=repo))
+    plan4 = ClaudeCliProvider().build_launch_plan(
+        spec4, session_id=str(uuid.uuid4()), run_dir=tmp_path / "run4"
+    )
+    assert "--tools" not in plan4.argv
+
+
+def test_definition_tools_edge_cases_split_and_join_via_split_tools(tmp_path):
+    """Additional edge-case coverage for R1: `tools=""` still emits the flag
+    (an explicit, if empty, allowlist -- distinguishable from arm 4's "no
+    tools: at all" case above, which emits no flag); a messy comma-separated
+    value normalizes via `_split_tools` the same way the `--agents` JSON
+    payload already does.
+    """
+    from lib_python_harness.resolve import resolve
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+
+    spec_empty = resolve(_definition(model="sonnet", tools=""), _host_context(cwd=repo))
+    plan_empty = ClaudeCliProvider().build_launch_plan(
+        spec_empty, session_id=str(uuid.uuid4()), run_dir=tmp_path / "run-empty"
+    )
+    assert "--tools" in plan_empty.argv
+    assert plan_empty.argv[plan_empty.argv.index("--tools") + 1] == ""
+
+    spec_messy = resolve(
+        _definition(model="sonnet", tools="Read ,, Glob"), _host_context(cwd=repo)
+    )
+    plan_messy = ClaudeCliProvider().build_launch_plan(
+        spec_messy, session_id=str(uuid.uuid4()), run_dir=tmp_path / "run-messy"
+    )
+    assert "--tools" in plan_messy.argv
+    assert plan_messy.argv[plan_messy.argv.index("--tools") + 1] == "Read,Glob"
+
+
 def test_no_system_prompt_flag_for_inherit(tmp_path):
     plan = _inherit_plan(tmp_path, system_prompt="Do the review.")
     assert "--system-prompt" not in plan.argv
