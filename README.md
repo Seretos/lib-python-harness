@@ -392,6 +392,57 @@ plan = provider.build_launch_plan(
 print(plan.argv)
 ```
 
+**Harness runs get a different default tool set than native subagents
+(#37).** An `Isolation.INHERIT` child process starts from the real `claude`
+CLI's own entrypoint default session tool set — a broad set that, measured
+against a plain `claude -p` session's own `init` event (`--model haiku
+--output-format stream-json --verbose`, no `--tools`, `claude` v2.1.278),
+includes `ListAgents`, `ReportFindings`, `ScheduleWakeup`, and the
+`Cron*`/`Task*`/`RemoteTrigger`/`PushNotification` families — tools a
+*dispatched* subagent (native or through this library) is not normally
+meant to have, since dispatching further agents, filing findings, or
+scheduling wakeups is ordinarily the parent session's job, not a
+subagent's. This library does not itself reference any of those seven
+names anywhere under `src/` (grep-verified: `ListAgents|ReportFindings|
+ScheduleWakeup|CronCreate|TaskCreate|RemoteTrigger|PushNotification` over
+`src/` returns 0 matches), so narrowing them away cannot break a feature
+here — their presence on an unnarrowed run comes from the CLI's own
+entrypoint default, before this library contributes anything, not from
+this library depending on them.
+
+Where a dispatched definition's `tools:` frontmatter is set, `resolve()`
+puts it on `RunSpec.tools`, and `_build_inherit_plan` now emits it as a
+top-level `--tools` session allowlist (comma-joined, reusing the same
+`_split_tools` normalizer as the `--agents` payload), in addition to
+whatever agent-scope carrier (`--agents` JSON `tools` array, or the
+materialized file's own `tools:` line) the dispatch mode already uses —
+one carrier per value would be simpler, but the session-level allowlist
+and the agent-scope declaration answer different questions to the CLI, so
+both are emitted. The same probe verified: `--tools Read,Glob` narrows the
+child's own `init` event `tools` key to exactly `Read`/`Glob` plus a
+residue of `mcp__*` MCP-server tool names — never any of the seven
+forbidden names — so an exact allowlist genuinely narrows the session, not
+just the agent scope.
+
+**Scope — what this proves and does not.** The `init` event's `tools` key
+enumerates both directly-callable tools (`ListAgents`, `ReportFindings`,
+`ScheduleWakeup` observed directly in the probe's plain-session list) and
+the deferred families (`Cron*`, `Task*`, `RemoteTrigger`,
+`PushNotification`, also observed present in the same probed list), so a
+run's own `events.jsonl` is evidence for both halves of the symptom, not
+only the directly-callable one.
+
+**Two deliberate, documented deviations** — a run is *not* narrowed by
+this mechanism in exactly these two cases:
+
+- **No `tools:` at all.** A definition that never sets `tools:` gets no
+  top-level `--tools` flag; the child keeps the entrypoint's full default
+  set (the same asymmetry CLEAN's own `tools` row above documents).
+- **`disallowedTools:`-only.** `--tools` is an *allow*list with no
+  top-level deny-flag counterpart, so a definition that sets only
+  `disallowedTools:` (no `tools:`) is not narrowed at the session level
+  either — only the agent scope sees `disallowedTools`.
+
 ### CodexCliProvider
 
 The `Provider` implementation that drives the OpenAI `codex` CLI
@@ -466,7 +517,7 @@ On native Windows `codex` is an npm `.cmd` shim: the harness resolves it via
 | `cwd` / `allow_nonempty_cwd` | same CLEAN cwd recipe as Claude (spawn cwd) |
 | `isolation=CLEAN` | the flag set above |
 | `isolation=INHERIT` | unsupported: raises `UnsupportedByProvider` |
-| `permission_mode`, `tools`, `disallowed_tools`, `skills`, `max_turns`, `hooks`, `omit_claude_md`, `agent_name`, `setting_sources`, `strict_mcp`, `session_tools`, `memory`, `system_prompt` | unsupported: raise `UnsupportedByProvider` |
+| `permission_mode`, `tools`, `disallowed_tools`, `skills`, `max_turns`, `hooks`, `omit_claude_md`, `agent_name`, `setting_sources`, `strict_mcp`, `memory`, `system_prompt` | unsupported: raise `UnsupportedByProvider` |
 | `mcp_servers` | unsupported: raises `UnsupportedByProvider` (known limitation, see below) |
 | `description` | silently unsupported: ignored, never an error |
 
@@ -538,7 +589,7 @@ Field mapping:
 | `max_turns` | `--max-turns N` |
 | `cwd` | fresh empty dir (or an empty caller dir) |
 | `description` | silently ignored |
-| `effort`, `json_schema`, `system_prompt`, `permission_mode`, `tools`, `disallowed_tools`, `skills`, `hooks`, `mcp_servers`, `omit_claude_md`, `agent_name`, `setting_sources`, `strict_mcp`, `session_tools`, `memory` | `UnsupportedByProvider` |
+| `effort`, `json_schema`, `system_prompt`, `permission_mode`, `tools`, `disallowed_tools`, `skills`, `hooks`, `mcp_servers`, `omit_claude_md`, `agent_name`, `setting_sources`, `strict_mcp`, `memory` | `UnsupportedByProvider` |
 
 `--output streaming` writes one JSON history entry per line; the result text
 is the last completed assistant `message`, `session_id` is its `sessionId`.
@@ -793,7 +844,7 @@ just through the materialized path or a converted array).
 | `model`             | top-level `--model`           | `model:`                 | `model: inherit` passes through literally |
 | `permissionMode`    | top-level `--permission-mode` | `permissionMode:`        | dropped at plugin scope                  |
 | `effort`            | top-level `--effort`          | (not carried)            | definition-else-context                  |
-| `tools`             | `--agents` `tools` (as array) | `tools:` (scalar)        | never a top-level `--allowedTools`       |
+| `tools`             | `--agents` `tools` (as array) | `tools:` (scalar)        | never a top-level `--allowedTools`; *also* becomes a top-level `--tools` session allowlist (comma-joined), independent of `payload`/`materialized` — see "Harness runs get a different default tool set than native subagents" below |
 | `disallowedTools`   | `--agents` `disallowedTools`  | `disallowedTools:`       | never a top-level `--disallowedTools`    |
 | `skills`            | `--agents` `skills`           | `skills:`                |                                           |
 | `maxTurns`          | `--agents` `maxTurns`         | `maxTurns:`              | never a top-level `--max-turns` (no such flag) |
@@ -877,8 +928,13 @@ Semantics worth knowing:
   clean child has no `--agents`/`--agent` binding and no
   `disallowedTools` (its `--tools` allowlist is exact). A named profile is
   `inherit` plus its fields: `settingSources` -> `--setting-sources`
-  (`[]` emits the flag with an empty operand), `strictMcp`, `tools` ->
-  a top-level `--tools` allowlist, `omitClaudeMd`, and `memory: false`.
+  (`[]` emits the flag with an empty operand), `strictMcp`, `omitClaudeMd`,
+  and `memory: false`. `tools` is *not* profile-specific: any INHERIT
+  dispatch whose resolved `RunSpec.tools` is set — profile, plain agent
+  frontmatter, or a bare `resolve()` call alike — gets the same top-level
+  `--tools` session allowlist (see "Harness runs get a different default
+  tool set than native subagents" below); a profile's own `tools:` is just
+  one more way to set that same field.
 - **`memory: false`** gives the run a fresh empty working directory (auto
   memory is keyed by cwd, so a directory `claude` has never run in has none
   to load) and adds the original cwd with `--add-dir`, so the project's

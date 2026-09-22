@@ -61,7 +61,6 @@ _UNSUPPORTED_FIELDS: tuple[str, ...] = (
     "agent_name",
     "setting_sources",
     "strict_mcp",
-    "session_tools",
     "memory",
     "system_prompt",
     "effort",

@@ -57,13 +57,30 @@ tool to check the variable; (2) every arm sets `permission_mode=
 on an approval prompt nobody can answer. Arm 3 additionally sets
 `tools="Bash"` on the `RunSpec`, since that is the one arm with a real
 agent scope (the materialized `--agent inherit-live-probe` file) for the
-field to land in via `materialize_agent_dir`'s `tools:` frontmatter key;
-arms 1/2 have no `agent_name` at all (no `--agents`/materialized carrier is
-built — see `_build_inherit_plan`), so `RunSpec.tools` would be a pure
-no-op there (never emitted as a top-level `--allowedTools`, by design —
-`test_tools_and_disallowed_tools_never_become_top_level_argv_flags`): the
+field to land in via `materialize_agent_dir`'s `tools:` frontmatter key.
+None of the three arms below rely on it, but as of #37's fix
+`RunSpec.tools` is *not* a no-op for arms 1/2 either: `_build_inherit_plan`
+now emits a top-level `--tools` allowlist from `spec.tools` directly,
+independent of `agent_name`/dispatch mode (previously this only happened
+through the now-deleted `session_tools` duplicate field, which `resolve()`
+and this module's bare `RunSpec(...)` calls never set, so the earlier
+claim that arms 1/2 had "no carrier for `RunSpec.tools` at all" held only
+for the pre-#37 code). Arms 1/2 simply never set `tools=`, so `spec.tools`
+stays `None` and no `--tools` flag is emitted for them either way — the
 top-level session's own default tool access, combined with
 `bypassPermissions`, is what carries Bash to the child in those two arms.
+
+#37 R0 (2026-09-22, `claude` v2.1.278, `.adev/37-2/r0/probe1.jsonl` /
+`probe2.jsonl`): a plain session's own `init` event carries a `tools` key
+(a JSON array of tool names, 116 entries in the probe, including all
+seven of the ticket's forbidden names: `ListAgents`, `ReportFindings`,
+`ScheduleWakeup`, and the `Cron*`/`Task*`/`RemoteTrigger`/`PushNotification`
+families); a session launched with `--tools Read,Glob` narrows that same
+key to exactly `["Glob","Read", ...]` plus a residue of `mcp__*`
+MCP-server tool names only — none of the seven forbidden names survive
+narrowing. See `tests/fixtures/fake_claude.py`'s `FAKE_DEFAULT_TOOLS`
+module comment for the same finding, which is what R2's offline fixture
+default is built from.
 """
 from __future__ import annotations
 
@@ -176,10 +193,11 @@ def test_inherit_materialized_mode_still_reaches_child(tmp_path, monkeypatch):
             mcp_servers={"demo": {"command": "echo"}},
             agent_name="inherit-live-probe",
             # This arm has a real agent scope (the materialized
-            # --agent inherit-live-probe file), so tools= actually lands in
+            # --agent inherit-live-probe file), so tools= lands both in
             # that file's `tools:` frontmatter key via materialize_agent_dir
-            # — unlike arms 1/2, which have no agent_name and so no carrier
-            # for RunSpec.tools at all (see module docstring, round 2 fix).
+            # (the agent scope) and, since #37, as a top-level --tools
+            # session allowlist too (see module docstring). Arms 1/2 simply
+            # never set tools=, not because they lack a carrier for it.
             tools="Bash",
             permission_mode="bypassPermissions",
         )

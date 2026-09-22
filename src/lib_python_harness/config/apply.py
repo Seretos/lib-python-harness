@@ -114,8 +114,6 @@ def apply_config(spec: RunSpec, definition, config: HarnessConfig, host_context)
         changes["disallowed_tools"] = (
             ", ".join(disallowed) if disallowed is not None else None
         )
-    if profile_tools is not None and not clean:
-        changes["session_tools"] = ",".join(tools or [])
 
     # -- profile fields -----------------------------------------------------
     strict = True  # the child's MCP set is computed below; see README

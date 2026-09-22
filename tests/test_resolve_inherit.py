@@ -404,9 +404,19 @@ def test_definition_tools_become_the_session_allowlist_and_the_agent_scope(tmp_p
     repo.mkdir()
     (repo / ".git").mkdir()
 
-    # Arm 1: payload dispatch, tools="Read, Glob".
+    # Arm 1: payload dispatch, tools="Read, Glob". `mcp_servers=None` on the
+    # host context (overriding `_host_context`'s own default `{}`) keeps
+    # `spec.mcp_servers` at `None`: `_host_context`'s default `{}` is itself
+    # not `None`, and `dispatch_mode` forces "materialized" the moment any
+    # `_SPEC_TO_AGENT_JSON_KEY` field is merely non-`None` (mcpServers has no
+    # slot in AGENT_JSON_KEYS) -- confirmed by
+    # `test_resolve_without_task_is_unchanged` (:664-691), which pins that
+    # same default-`{}` behaviour deliberately. Without this override arm 1
+    # would silently dispatch materialized and never reach `--agents` at
+    # all, defeating the "payload dispatch" this arm names.
     spec = resolve(
-        _definition(model="sonnet", tools="Read, Glob"), _host_context(cwd=repo)
+        _definition(model="sonnet", tools="Read, Glob"),
+        _host_context(cwd=repo, mcp_servers=None),
     )
     plan = ClaudeCliProvider().build_launch_plan(
         spec, session_id=str(uuid.uuid4()), run_dir=tmp_path / "run1"
@@ -420,7 +430,10 @@ def test_definition_tools_become_the_session_allowlist_and_the_agent_scope(tmp_p
     # Arm 2: same shape, tools="Bash" -- anti-tautology (the pattern this
     # module already uses at :79-87 / :278-289): a provider that hard-coded
     # "Read,Glob" would still satisfy arm 1 alone.
-    spec2 = resolve(_definition(model="sonnet", tools="Bash"), _host_context(cwd=repo))
+    spec2 = resolve(
+        _definition(model="sonnet", tools="Bash"),
+        _host_context(cwd=repo, mcp_servers=None),
+    )
     plan2 = ClaudeCliProvider().build_launch_plan(
         spec2, session_id=str(uuid.uuid4()), run_dir=tmp_path / "run2"
     )

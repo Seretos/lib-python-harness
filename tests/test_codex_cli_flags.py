@@ -205,7 +205,6 @@ def test_all_offending_fields_are_listed_at_once(tmp_path):
         ("agent_name", "reviewer"),
         ("setting_sources", ["user"]),
         ("strict_mcp", True),
-        ("session_tools", "Bash"),
         ("memory", False),
         ("system_prompt", "be terse"),
     ],
