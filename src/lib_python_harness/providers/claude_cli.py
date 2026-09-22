@@ -434,15 +434,9 @@ class ClaudeCliProvider:
             # this, a server absent from --mcp-config would still be
             # reachable through inherited user/project settings.
             argv += ["--strict-mcp-config"]
-        if spec.session_tools is not None:
-            argv += ["--tools", spec.session_tools]
+        if spec.tools is not None:
+            argv += ["--tools", ",".join(_split_tools(spec.tools) or [])]
         argv += ["--output-format", "stream-json", "--verbose"]
-
-        # tools/disallowedTools/maxTurns/skills are the *agent's* scope, not
-        # the session's: never a top-level --allowedTools/--disallowedTools/
-        # --max-turns for INHERIT (plan Mechanism balance — one carrier per
-        # value, via the --agents payload or the materialized frontmatter
-        # below, never both).
 
         if spec.mcp_servers:
             # `--mcp-config`'s JSON schema wants a full MCP-config-file

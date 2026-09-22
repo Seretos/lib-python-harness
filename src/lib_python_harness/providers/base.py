@@ -115,11 +115,10 @@ class RunSpec:
     # `setting_sources` replaces `--setting-sources`' value; `strict_mcp`
     # makes INHERIT emit `--strict-mcp-config`; `memory=False` gives an
     # INHERIT run a fresh cwd (no project memory) plus `--add-dir` of the
-    # original one; `session_tools` is a top-level `--tools` allowlist.
+    # original one.
     setting_sources: list[str] | None = None
     strict_mcp: bool | None = None
     memory: bool | None = None
-    session_tools: str | None = None
 
 
 @dataclass(frozen=True)

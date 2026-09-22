@@ -8,8 +8,10 @@ so that test can drive a full spawn/parse/persist cycle through the real
 Ignores its argv except ``--version`` (answered the way the real CLI would,
 so the harness's own `claude --version` provenance step has something real
 to parse), ``--session-id`` (echoed back into the emitted events, the way
-the real CLI would echo the session it was told to use) and ``--sleep
-<seconds>`` (R3/R4: used by
+the real CLI would echo the session it was told to use), ``--tools`` (#37
+R0/R2: echoed, split on `,`, into the ``init`` event's own ``tools`` key --
+a stand-in default set stands in for it when the flag is absent, the way the
+real CLI's entrypoint default does) and ``--sleep <seconds>`` (R3/R4: used by
 ``tests/test_harness_offline.py::test_stop_cancels_running_child`` to keep a
 real child alive long enough for `Harness.stop()` to have something to
 signal and kill — the plain mode below exits the instant it emits its
@@ -25,6 +27,57 @@ import sys
 import time
 
 FAKE_VERSION = "0.0.1 (Claude Code)"
+
+# #37 R0: a plain `claude -p --model haiku --output-format stream-json
+# --verbose` session (no --tools), probed 2026-09-22 against installed
+# `claude` v2.1.278 (.adev/37-2/r0/probe1.jsonl), carries a 116-entry `tools`
+# key on its own `init` event -- the entrypoint's default session set. This
+# stand-in is not that full list, only a representative subset: the six
+# ordinary tools an offline test still wants to see, plus every one of the
+# ticket's seven forbidden names -- the three the ticket calls
+# directly-callable (`ListAgents`, `ReportFindings`, `ScheduleWakeup`) and
+# the four deferred families (`Cron*`, `Task*`, `RemoteTrigger`,
+# `PushNotification`), all of which R0's probe confirmed present in the real
+# plain list (answer to R0 (c): all seven observed, not just the three
+# direct ones). A second probe with `--tools Read,Glob` showed the flag
+# narrows this list to exactly `Read`/`Glob` plus other MCP-server tool
+# names never part of the harness's own default set -- none of the seven
+# forbidden names survive it (R0 (b)/(d)).
+FAKE_DEFAULT_TOOLS = [
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "ListAgents",
+    "ReportFindings",
+    "ScheduleWakeup",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "TaskCreate",
+    "TaskGet",
+    "TaskList",
+    "TaskStop",
+    "TaskUpdate",
+    "RemoteTrigger",
+    "PushNotification",
+]
+
+
+def _init_tools(argv: list[str]) -> list[str]:
+    """The `init` event's own `tools` list: the `--tools` operand split on
+    `,` when the flag is present (mirrors `providers.claude_cli._split_tools`
+    -- empty/whitespace-only entries drop out, so a CLEAN run's always-present
+    but often-empty `--tools ""` yields `[]`), else `FAKE_DEFAULT_TOOLS`
+    (R0's plain-probe stand-in) -- the fixture's only channel for observing
+    what a spawned run's own session-level tool allowlist actually was."""
+    if "--tools" in argv:
+        idx = argv.index("--tools")
+        operand = argv[idx + 1] if idx + 1 < len(argv) else ""
+        return [item.strip() for item in operand.split(",") if item.strip()]
+    return list(FAKE_DEFAULT_TOOLS)
 
 
 def main() -> int:
@@ -46,7 +99,12 @@ def main() -> int:
     # --sleep run finish (instead of killing it) still gets a real init
     # event before the sleep — and, if never killed, the same terminal
     # event sequence afterwards.
-    init_event = {"type": "system", "subtype": "init", "session_id": session_id}
+    init_event = {
+        "type": "system",
+        "subtype": "init",
+        "session_id": session_id,
+        "tools": _init_tools(argv),
+    }
     print(json.dumps(init_event), flush=True)
 
     # --ticks <n> / --tick-interval <s>: emit n assistant events, spaced
