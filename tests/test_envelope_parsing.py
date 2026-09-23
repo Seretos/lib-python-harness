@@ -116,3 +116,138 @@ def test_describe_last_activity_is_scoped_to_the_newest_event():
     assert ClaudeCliProvider().describe_last_activity(lines) == "text"
     result = _line({"type": "user", "message": {"content": [{"type": "tool_result"}]}})
     assert ClaudeCliProvider().describe_last_activity([_assistant(_TOOL_USE), result]) == "tool_result"
+
+
+# -- #42 R1 additional edge-case coverage: abandoned_background_tasks -------
+#
+# `parse_events` driven directly with hand-built stream-json lines, covering
+# the resolution rules the fixture-driven tests in test_harness_offline.py
+# and test_harness_observe.py cannot isolate one at a time: which of the
+# three signals (notification / non-running poll / TaskStop) resolves a
+# pending launch, and what happens when the ack can't be parsed at all.
+
+
+def _tool_use(tool_use_id, name, input_):
+    return {"type": "tool_use", "id": tool_use_id, "name": name, "input": input_}
+
+
+def _bg_launch(launch_id, ack_text=None, task_id="bg1"):
+    """The two lines a real backgrounded launch always produces: the Bash
+    tool_use with `run_in_background: true`, and its ack `tool_result`.
+    `ack_text` overrides the ack content (for the "unparseable ack" cases);
+    default is a parseable ack naming `task_id`.
+    """
+    if ack_text is None:
+        ack_text = f"Command running in background with ID: {task_id}. ..."
+    return [
+        _assistant(
+            _tool_use(launch_id, "Bash", {"command": "sleep 75", "run_in_background": True})
+        ),
+        _line(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": launch_id, "content": ack_text}
+                    ]
+                },
+            }
+        ),
+    ]
+
+
+def _poll(task_id, status, poll_id="toolu_poll"):
+    return [
+        _assistant(_tool_use(poll_id, "TaskOutput", {"task_id": task_id})),
+        _line(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": poll_id,
+                            "content": f"<task_id>{task_id}</task_id>\n<status>{status}</status>",
+                        }
+                    ]
+                },
+            }
+        ),
+    ]
+
+
+def _task_stop(task_id, stop_id="toolu_stop"):
+    return _assistant(_tool_use(stop_id, "TaskStop", {"task_id": task_id}))
+
+
+def _notification(tool_use_id, task_id="bg1", status="completed"):
+    text = (
+        "<task-notification>\n"
+        f"<task-id>{task_id}</task-id>\n"
+        f"<tool-use-id>{tool_use_id}</tool-use-id>\n"
+        f"<status>{status}</status>\n"
+        "</task-notification>"
+    )
+    return _line({"type": "user", "message": {"content": text}})
+
+
+_TERMINAL_RESULT = _line(
+    {"type": "result", "subtype": "success", "is_error": False, "result": "done", "session_id": "s"}
+)
+
+
+def test_completed_poll_for_a_different_task_id_does_not_resolve():
+    lines = (
+        [_INIT_LINE]
+        + _bg_launch("L1", task_id="bg1")
+        + _poll("some-other-task", "completed")
+        + [_TERMINAL_RESULT]
+    )
+    result = ClaudeCliProvider().parse_events(lines)
+    assert result.abandoned_background_tasks == ("L1",)
+
+
+def test_task_stop_for_the_task_id_resolves():
+    lines = [_INIT_LINE] + _bg_launch("L1", task_id="bg1") + [_task_stop("bg1"), _TERMINAL_RESULT]
+    result = ClaudeCliProvider().parse_events(lines)
+    assert result.abandoned_background_tasks == ()
+
+
+def test_poll_with_status_failed_resolves():
+    lines = (
+        [_INIT_LINE] + _bg_launch("L1", task_id="bg1") + _poll("bg1", "failed") + [_TERMINAL_RESULT]
+    )
+    result = ClaudeCliProvider().parse_events(lines)
+    assert result.abandoned_background_tasks == ()
+
+
+def test_unparseable_ack_plus_completed_poll_is_still_flagged():
+    lines = (
+        [_INIT_LINE]
+        + _bg_launch("L1", ack_text="Started an asynchronous job.")
+        + _poll("bg1", "completed")
+        + [_TERMINAL_RESULT]
+    )
+    result = ClaudeCliProvider().parse_events(lines)
+    assert result.abandoned_background_tasks == ("L1",)
+
+
+def test_unparseable_ack_plus_notification_resolves():
+    lines = (
+        [_INIT_LINE]
+        + _bg_launch("L1", ack_text="Started an asynchronous job.")
+        + [_notification("L1"), _TERMINAL_RESULT]
+    )
+    result = ClaudeCliProvider().parse_events(lines)
+    assert result.abandoned_background_tasks == ()
+
+
+def test_two_launches_with_one_notified_give_only_the_other():
+    lines = (
+        [_INIT_LINE]
+        + _bg_launch("L1", task_id="bg1")
+        + _bg_launch("L2", task_id="bg2")
+        + [_notification("L1", task_id="bg1"), _TERMINAL_RESULT]
+    )
+    result = ClaudeCliProvider().parse_events(lines)
+    assert result.abandoned_background_tasks == ("L2",)
