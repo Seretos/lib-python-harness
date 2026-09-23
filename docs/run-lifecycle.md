@@ -48,7 +48,8 @@ straight to a whole-tree force kill (`taskkill /T /F`).
   could parse.
 - `RUNNING -> FAILED`: the child exited non-zero, or its stream ended
   without a terminal `result` event (a truncated stream never counts as
-  success).
+  success), or (claude only, #42) it ended with a `run_in_background: true`
+  task still unresolved — `RunResult.abandoned_background_tasks` names it.
 - `RUNNING -> CANCELLED`: `Harness.stop()` was called on a still-`RUNNING`
   run: graceful signal (`SIGTERM`) -> bounded wait -> force kill (`SIGKILL`)
   -> reap, all identity-checked against the pid's captured start time so a

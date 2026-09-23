@@ -167,7 +167,12 @@ wrote, i.e. working or hung) and `last_activity` (provider-derived label of
 the newest event, e.g. `tool_use:Bash`, `text`, `tool_result`, `init`; `None`
 for providers without one or an unrecognizable stream) show live progress; on
 a terminal result `event_count` / `last_event_at` / `last_activity` are
-`0` / `None` / `None`.
+`0` / `None` / `None`. `abandoned_background_tasks` names every
+`run_in_background: true` task a `claude` run launched but never reported
+finished (by notification, a poll, or `TaskStop`) before its own turn ended —
+`()` for every other provider and every claude run that launched none —
+and such a run ends `FAILED` rather than `COMPLETED` (see
+`docs/run-lifecycle.md`).
 
 ```python
 from lib_python_harness import Harness, RunSpec, Isolation, RunResult
