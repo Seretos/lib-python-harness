@@ -165,6 +165,16 @@ class RunResult:
     event_count: int = 0
     last_event_at: float | None = None
     last_activity: str | None = None
+    # #42: tool_use ids of every `run_in_background: true` launch the stream
+    # never reported finished -- by a `<tool-use-id>` notification, a poll
+    # (`TaskOutput`) whose `<status>` turned non-"running", or a `TaskStop`
+    # on the same task id. Populated by `ClaudeCliProvider.parse_events`;
+    # `Harness._finalize` fails a run that ends with any of these still
+    # pending, so the deferred/real answer is never silently discarded in
+    # favour of a stale interim `text`. `()` for every provider/run that
+    # never launches a background task (codex, mistral, and any claude run
+    # with no `run_in_background` tool_use keep this default untouched).
+    abandoned_background_tasks: tuple[str, ...] = ()
 
 
 # Splits a lowercased model string into namespace tokens for the family

@@ -435,6 +435,29 @@ def test_poll_reconciles_an_orphaned_run(tmp_path):
     assert result.state is RunState.FAILED
 
 
+# -- #42 R2: observer-process finalization applies the same rule ------------
+
+
+def test_observer_finalizes_abandoned_background_task_as_failed(tmp_path):
+    """A background task never reported finished must fail the run even
+    when the finalizing `Harness` is a foreign observer process reading only
+    the persisted record after a JSON round-trip (`FileRunStore`) -- not
+    just the starter's own in-process `Harness` (R1, test_harness_offline.py).
+    """
+    run_id = _start_and_let_starter_exit(
+        tmp_path,
+        fake_args=["--background-task", "toolu_bg", "--reply", "Waiting..."],
+    )
+    observer = _observer(tmp_path)
+
+    result = observer.wait_for(run_id, timeout=30)
+
+    assert result.state is RunState.FAILED
+    assert result.abandoned_background_tasks == ("toolu_bg",)
+    record = FileRunStore(tmp_path).get(run_id)
+    assert record["state"] is RunState.FAILED
+
+
 # -- package 25: wait() is cross-process and never cancels --------------------
 
 WAIT_RUN = FIXTURES / "wait_run.py"

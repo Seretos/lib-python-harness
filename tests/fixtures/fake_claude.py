@@ -107,6 +107,123 @@ def main() -> int:
     }
     print(json.dumps(init_event), flush=True)
 
+    # --background-task <id>: right after init and before any
+    # --ticks/--tool-ticks output, emits a Bash tool_use launched with
+    # run_in_background: true (id = <id>) plus its ack tool_result naming a
+    # fixed background task id "bg1" (#42 R1/R2/R3 -- the ticket's repro is a
+    # backgrounded tool_use whose completion notification never lands before
+    # the run's own turn ends). Two optional flags, each checked after the
+    # launch so their fixed ordering matches the plan's fixture spec:
+    #   --background-poll <status>: a TaskOutput poll naming task "bg1" and
+    #     the given <status> (e.g. "running", "completed", "failed").
+    #   --background-notify: a <task-notification> naming task "bg1" and
+    #     tool-use-id <id> (the launch's own id), status "completed".
+    if "--background-task" in argv:
+        launch_id = argv[argv.index("--background-task") + 1]
+        task_id = "bg1"
+        print(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": launch_id,
+                                "name": "Bash",
+                                "input": {
+                                    "command": "sleep 75",
+                                    "run_in_background": True,
+                                },
+                            }
+                        ]
+                    },
+                }
+            ),
+            flush=True,
+        )
+        print(
+            json.dumps(
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": launch_id,
+                                "content": (
+                                    f"Command running in background with ID: "
+                                    f"{task_id}. Use TaskOutput to read its output."
+                                ),
+                            }
+                        ]
+                    },
+                }
+            ),
+            flush=True,
+        )
+
+        if "--background-poll" in argv:
+            status = argv[argv.index("--background-poll") + 1]
+            poll_id = f"toolu_poll_{task_id}"
+            print(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": poll_id,
+                                    "name": "TaskOutput",
+                                    "input": {"task_id": task_id},
+                                }
+                            ]
+                        },
+                    }
+                ),
+                flush=True,
+            )
+            print(
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": poll_id,
+                                    "content": (
+                                        f"<task_id>{task_id}</task_id>\n"
+                                        f"<status>{status}</status>"
+                                    ),
+                                }
+                            ]
+                        },
+                    }
+                ),
+                flush=True,
+            )
+
+        if "--background-notify" in argv:
+            print(
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "content": (
+                                "<task-notification>\n"
+                                f"<task-id>{task_id}</task-id>\n"
+                                f"<tool-use-id>{launch_id}</tool-use-id>\n"
+                                "<status>completed</status>\n"
+                                "</task-notification>"
+                            )
+                        },
+                    }
+                ),
+                flush=True,
+            )
+
     # --ticks <n> / --tick-interval <s>: emit n assistant events, spaced
     # tick-interval apart, before the terminal event -- a run whose events
     # log visibly grows while it is alive (live-progress tests).

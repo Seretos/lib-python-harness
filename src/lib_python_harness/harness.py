@@ -713,7 +713,11 @@ class Harness:
         )
 
         self._remove_cleanup_paths(record)
-        failed = parse_error is not None or (proc is not None and exit_code != 0)
+        failed = (
+            parse_error is not None
+            or (proc is not None and exit_code != 0)
+            or bool(parsed and parsed.abandoned_background_tasks)
+        )
         new_state = RunState.FAILED if failed else RunState.COMPLETED
         record["state"] = transition(record["state"], new_state)
         record["exit_code"] = exit_code
@@ -727,6 +731,7 @@ class Harness:
             record["structured_output"] = parsed.structured_output
             record["usage"] = parsed.usage
             record["cost"] = parsed.cost
+            record["abandoned_background_tasks"] = list(parsed.abandoned_background_tasks)
             if parsed.session_id:
                 record["session_id"] = parsed.session_id
 
@@ -787,6 +792,7 @@ class Harness:
             event_count=event_count,
             last_event_at=last_event_at,
             last_activity=last_activity,
+            abandoned_background_tasks=tuple(record.get("abandoned_background_tasks") or ()),
         )
 
 

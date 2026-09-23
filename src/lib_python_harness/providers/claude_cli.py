@@ -20,6 +20,7 @@ the isolation profile itself.
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable
@@ -347,6 +348,28 @@ def _scrub_env() -> dict[str, str]:
     return scrub_env(SCRUBBED_ENV, (_SCRUBBED_ENV_PREFIX,))
 
 
+# #42 pending-background-launch walk (`ClaudeCliProvider.parse_events`): the
+# three text shapes that can resolve a `run_in_background: true` launch L
+# (its tool_use id) to, or past, its background task id T.
+#
+# - `_BACKGROUND_ACK`: T is not carried anywhere on the launch's own
+#   `tool_use` block — the *only* place it appears is the ack `tool_result`
+#   text the CLI writes back for that same launch (verified live, plan
+#   Premises verified). If the ack text does not match this pattern, T stays
+#   unknown for that launch and only a `<tool-use-id>` notification (below)
+#   can still resolve it — never a poll, since a poll is keyed by T.
+# - `_POLL_RESULT`: a `TaskOutput` poll's result text carries both T and its
+#   `<status>` in the *same* tool_result content string, so matching them as
+#   one pair (not two independent substring searches) never mispairs ids
+#   across two polls that happen to land in the same event (plan-critic
+#   round 3 note 2).
+# - `_NOTIFICATION_TOOL_USE_ID`: a `<task-notification>` names the launch id
+#   L directly, so it resolves a launch even when the ack was unparseable.
+_BACKGROUND_ACK = re.compile(r"running in background with ID: (\w+)")
+_POLL_RESULT = re.compile(r"<task_id>(\w+)</task_id>\s*<status>(\w+)</status>")
+_NOTIFICATION_TOOL_USE_ID = re.compile(r"<tool-use-id>(\w+)</tool-use-id>")
+
+
 class ClaudeCliProvider:
     """Builds and parses the `claude` CLI's command line, for either
     isolation profile."""
@@ -533,6 +556,43 @@ class ClaudeCliProvider:
         return None
 
     @staticmethod
+    def _content_blocks(event: Any) -> list[dict]:
+        """The dict blocks of an event's `message.content` list — the shape
+        both `_activity_label` (the newest-event liveness label) and
+        `parse_events`'s pending-background-launch walk read. A plain-string
+        `message.content` (the `<task-notification>` shape parse_events also
+        has to see) is not a block list and yields `[]` here; a caller that
+        needs that string reads `message.content` directly."""
+        message = event.get("message") if isinstance(event, dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+    @staticmethod
+    def _tool_result_texts(block: dict) -> list[str]:
+        """A `tool_result` block's own text, for substring/regex matching:
+        its `content` when that is a plain string, or each list item's own
+        `text` when `content` is a list of text items (plan Text
+        extraction)."""
+        content = block.get("content")
+        if isinstance(content, str):
+            return [content]
+        if isinstance(content, list):
+            return [
+                item["text"]
+                for item in content
+                if isinstance(item, dict) and isinstance(item.get("text"), str)
+            ]
+        return []
+
+    @staticmethod
+    def _resolve_pending_by_task(pending: dict[str, str | None], task_id: str) -> None:
+        """Drop every still-pending launch currently mapped to `task_id` —
+        shared by the `TaskStop` and non-"running"-poll resolution signals,
+        both of which resolve by T rather than by L."""
+        for launch_id in [lid for lid, mapped in pending.items() if mapped == task_id]:
+            del pending[launch_id]
+
+    @staticmethod
     def _activity_label(event: Any) -> str | None:
         if not isinstance(event, dict):
             return None
@@ -541,9 +601,7 @@ class ClaudeCliProvider:
             return "init" if event.get("subtype") == "init" else None
         if kind not in ("assistant", "user"):
             return None
-        message = event.get("message")
-        content = message.get("content") if isinstance(message, dict) else None
-        blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+        blocks = ClaudeCliProvider._content_blocks(event)
         if kind == "assistant":
             tools = [b for b in blocks if b.get("type") == "tool_use"]
             if tools:
@@ -554,14 +612,62 @@ class ClaudeCliProvider:
         return "tool_result" if any(b.get("type") == "tool_result" for b in blocks) else None
 
     def parse_events(self, lines: Iterable[str]) -> RunResult:
+        """One pass in stream order. Alongside the terminal `result` event,
+        tracks `pending`: every `run_in_background: true` Bash launch (its
+        `tool_use` id L, mapped to its background task id T once the ack
+        parses) that no later event has resolved by one of the three signals
+        `_BACKGROUND_ACK`/`_POLL_RESULT`/`_NOTIFICATION_TOOL_USE_ID` module
+        docstring names — an intervening "still running" poll, or any other
+        tool call, resolves nothing (plan Approach; round-2 misread::M1).
+        `abandoned_background_tasks` is `tuple(pending)` at the end, in
+        launch order (dicts preserve insertion order; a resolved launch's
+        `del` never reorders what remains).
+        """
         terminal: dict | None = None
+        pending: dict[str, str | None] = {}
         for line in lines:
             line = line.strip()
             if not line:
                 continue
             event = json.loads(line)
-            if event.get("type") == "result":
+            kind = event.get("type")
+            if kind == "result":
                 terminal = event
+                continue
+            if kind == "assistant":
+                for block in self._content_blocks(event):
+                    if block.get("type") != "tool_use":
+                        continue
+                    name = block.get("name")
+                    tool_input = block.get("input")
+                    tool_input = tool_input if isinstance(tool_input, dict) else {}
+                    if name == "Bash" and tool_input.get("run_in_background"):
+                        launch_id = block.get("id")
+                        if launch_id is not None:
+                            pending[launch_id] = None
+                    elif name == "TaskStop":
+                        task_id = tool_input.get("task_id")
+                        if task_id is not None:
+                            self._resolve_pending_by_task(pending, task_id)
+            elif kind == "user":
+                for block in self._content_blocks(event):
+                    if block.get("type") != "tool_result":
+                        continue
+                    tool_use_id = block.get("tool_use_id")
+                    for text in self._tool_result_texts(block):
+                        if tool_use_id in pending and pending[tool_use_id] is None:
+                            ack = _BACKGROUND_ACK.search(text)
+                            if ack:
+                                pending[tool_use_id] = ack.group(1)
+                        for match in _POLL_RESULT.finditer(text):
+                            task_id, status = match.group(1), match.group(2)
+                            if status != "running":
+                                self._resolve_pending_by_task(pending, task_id)
+                message = event.get("message")
+                content = message.get("content") if isinstance(message, dict) else None
+                if isinstance(content, str):
+                    for match in _NOTIFICATION_TOOL_USE_ID.finditer(content):
+                        pending.pop(match.group(1), None)
 
         if terminal is None:
             raise ValueError(
@@ -577,4 +683,5 @@ class ClaudeCliProvider:
             usage=terminal.get("usage") or {},
             cost=terminal.get("total_cost_usd"),
             session_id=terminal.get("session_id"),
+            abandoned_background_tasks=tuple(pending),
         )

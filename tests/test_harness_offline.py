@@ -553,3 +553,83 @@ def test_definition_with_no_tools_still_shows_the_default_set(tmp_path):
     tools = _init_event_tools(record["events_path"])
 
     assert FORBIDDEN_TOOL_NAMES <= set(tools)
+
+
+# -- #42 R1/R3: a backgrounded task never reported finished fails the run ----
+#
+# The repro (plan "Premises verified"): the agent's turn ends with an
+# unresolved `run_in_background: true` tool_use still pending -- no
+# notification, no poll that found it finished, no deliberate TaskStop.
+# `Harness._finalize` must not let that come back as a plain COMPLETED with
+# the stale interim text ("Waiting...") standing in for a real answer that
+# was never delivered.
+
+BACKGROUND_TASK_ID = "toolu_bg"
+
+
+def _background_harness(*fake_args) -> Harness:
+    return Harness(
+        store=InMemoryRunStore(),
+        claude_argv=[sys.executable, str(FAKE_CLAUDE), *fake_args],
+    )
+
+
+def _background_spec() -> RunSpec:
+    return RunSpec(prompt="do work", isolation=Isolation.CLEAN, model="haiku")
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        [],
+        ["--background-poll", "running"],
+        ["--background-poll", "running", "--tool-ticks", "1"],
+    ],
+    ids=["no-poll", "still-running-poll", "still-running-poll-then-tool-call"],
+)
+def test_run_with_abandoned_background_task_is_failed(extra):
+    """#42 R1 (misread::M1): a background task launched with
+    `run_in_background: true` and never reported finished -- by
+    notification, by a poll that found it finished, or by a deliberate
+    TaskStop -- must not let the run end COMPLETED with the stale interim
+    text as if it were the final answer. An intervening "still running" poll,
+    and an unrelated tool call after it, must not resolve the launch either
+    (round-2 misread::M1: "any other tool_use clears pending" is wrong).
+    """
+    harness = _background_harness(
+        "--background-task", BACKGROUND_TASK_ID, *extra, "--reply", "Waiting..."
+    )
+
+    result = harness.run(_background_spec())
+
+    assert result.state is RunState.FAILED
+    assert result.abandoned_background_tasks == (BACKGROUND_TASK_ID,)
+    assert result.text == "Waiting..."
+
+
+@pytest.mark.parametrize(
+    "fake_args",
+    [
+        ["--background-task", BACKGROUND_TASK_ID, "--background-notify"],
+        ["--background-task", BACKGROUND_TASK_ID, "--background-poll", "completed"],
+        [
+            "--background-task", BACKGROUND_TASK_ID,
+            "--background-poll", "running", "--background-notify",
+        ],
+        ["--tool-ticks", "2"],
+    ],
+    ids=["notified", "completed-poll", "still-running-poll-then-notified", "no-background-task"],
+)
+def test_background_task_resolved_cases_complete(fake_args):
+    """#42 R3 (guard for round-1 F1 and the foreground AC): a background
+    task later reported finished -- by notification, by a poll that already
+    found it finished, or by a still-running poll followed later by a
+    notification -- must not flag the run; nor must a run with no
+    background task at all (the plain foreground case).
+    """
+    harness = _background_harness(*fake_args)
+
+    result = harness.run(_background_spec())
+
+    assert result.state is RunState.COMPLETED
+    assert result.abandoned_background_tasks == ()
