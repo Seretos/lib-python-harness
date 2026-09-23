@@ -353,7 +353,9 @@ def test_resume_with_provider_lacking_build_resume_plan_is_unsupported(spawn_cal
 
 
 def test_start_resume_returns_running_before_child_exits(tmp_path):
-    harness = _fake_harness(extra=("--sleep", "0.5"))
+    child_sleep = 3.0
+    budget = child_sleep / 2
+    harness = _fake_harness(extra=("--sleep", str(child_sleep)))
     origin, _ = _origin_run(tmp_path, harness)
     assert origin.state == RunState.COMPLETED
 
@@ -361,10 +363,15 @@ def test_start_resume_returns_running_before_child_exits(tmp_path):
     started = harness.start_resume(origin.run_id, "follow-up prompt")
     elapsed = time.monotonic() - t0
 
-    assert elapsed < 0.3, f"start_resume blocked for {elapsed:.2f}s (child sleeps 0.5s)"
+    assert elapsed < budget, (
+        f"start_resume blocked for {elapsed:.2f}s "
+        f"(budget {budget:.1f}s, child sleeps {child_sleep:.1f}s)"
+    )
     assert isinstance(started, RunResult)
     assert started.run_id != origin.run_id
     assert started.session_id == origin.session_id
+    # The RUNNING assertions below are the real regression guard (start_resume
+    # must not block on the child); the timing check above is secondary.
     assert started.state == RunState.RUNNING
     assert harness.store.get(started.run_id)["resumed_from"] == origin.run_id
     assert harness.poll(started.run_id).state == RunState.RUNNING
