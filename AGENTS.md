@@ -54,16 +54,17 @@ dispatches the work package. It is never done by hand on `main`.
 
 Each release opens a "bump me" ticket in every consumer repo automatically,
 via one step in `.github/workflows/release.yml` that calls the central action
-`Seretos/agent-plugin-dev/.github/actions/notify-consumers@main`. The action
+`seretos-agents/modular-software-factory-dev/.github/actions/notify-consumers@main`. The action
 owns ticket title, body, labels and board placement; this repo only supplies
-the facts (version, source repo, consumer list, token). The step is
-`continue-on-error`, so a notification failure never fails the release.
+the facts (version, source repo, consumer list, token). A notification
+failure fails the release run itself (no `continue-on-error`) — silently
+missing bump tickets is worse than a red run.
 
 - **Consumer list:** the `consumers:` input of that step in `release.yml`
   (one `owner/repo` per line). Add a line when a repo starts pinning this lib.
 - **Human prerequisite — `ECOSYSTEM_TOKEN`:** a repository secret (Settings ->
   Secrets -> Actions) holding a classic PAT with `repo` and `project` scope.
-  Without it the step is a red-annotated no-op. Creating/rotating it is a
+  Without it the step fails the release run. Creating/rotating it is a
   human task.
 - **Catch-up:** if a notification was skipped or failed, re-file it with the
   `open-dep-ticket` workflow in the meta-repo.

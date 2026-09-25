@@ -31,7 +31,7 @@ name: release
 # marketplace. The publish steps use only the built-in secrets.GITHUB_TOKEN.
 #
 # Downstream notification: the final step calls the central notify-consumers
-# action (Seretos/agent-plugin-dev), which opens a "bump me" ticket in every
+# action (seretos-agents/modular-software-factory-dev), which opens a "bump me" ticket in every
 # consumer listed in its `consumers:` input. It needs the ECOSYSTEM_TOKEN
 # secret. Catch-up for a missed notification: the meta-repo's
 # `open-dep-ticket` workflow. See AGENTS.md "Downstream dependency
@@ -136,13 +136,13 @@ jobs:
             $PRE_FLAG
 
       - name: Open dependency-update tickets in consumers
-        # continue-on-error: a missing/invalid ECOSYSTEM_TOKEN or a broken
-        # consumer must never fail the release itself.
-        continue-on-error: true
-        uses: Seretos/agent-plugin-dev/.github/actions/notify-consumers@main
+        # A failure here (a missing/invalid ECOSYSTEM_TOKEN or a broken
+        # consumer) fails the release run itself -- silently missing bump
+        # tickets is worse than a red run.
+        uses: seretos-agents/modular-software-factory-dev/.github/actions/notify-consumers@main
         with:
           version: ${{ inputs.version }}
           source_repo: ${{ github.repository }}
           consumers: |
-            Seretos/agent-harness
+            seretos-agents/agent-harness
           gh_token: ${{ secrets.ECOSYSTEM_TOKEN }}
