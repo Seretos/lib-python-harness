@@ -1,15 +1,15 @@
 name: tests
 
-# Runs pytest on every push to any branch and on every PR. Distinct
-# from release.yml which is workflow_dispatch-driven and produces the
+# Runs pytest on every pull request only -- not on push. A push-triggered
+# run on the same branch as an open PR would duplicate the PR run (both
+# fire for the same commit), so PRs are the sole trigger. Distinct from
+# release.yml which is workflow_dispatch-driven and produces the
 # release-branch + tag.
 #
 # Matrix: windows-latest + ubuntu-22.04. The 22.04 pin (not
 # ubuntu-latest) matches the WSL2 / plugin-binary glibc target, so a
 # regression here would be visible to the same downstream consumers.
 on:
-  push:
-    branches: ["**"]
   pull_request:
 
 permissions:
