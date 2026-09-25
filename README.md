@@ -11,17 +11,17 @@ Pin an exact tag (recommended) or the floating major-release branch:
 
 ```bash
 # exact tag
-pip install "git+https://github.com/Seretos/lib-python-harness@v0.0.1"
+pip install "git+https://github.com/seretos-agents/lib-python-harness@v0.0.1"
 
 # floating: latest 0.x.y release
-pip install "git+https://github.com/Seretos/lib-python-harness@release/0.x"
+pip install "git+https://github.com/seretos-agents/lib-python-harness@release/0.x"
 ```
 
 Or in a consumer's `pyproject.toml`:
 
 ```toml
 dependencies = [
-  "lib-python-harness @ git+https://github.com/Seretos/lib-python-harness@v0.0.1",
+  "lib-python-harness @ git+https://github.com/seretos-agents/lib-python-harness@v0.0.1",
 ]
 ```
 
